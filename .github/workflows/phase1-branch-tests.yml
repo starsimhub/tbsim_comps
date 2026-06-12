@@ -1,0 +1,48 @@
+name: Phase 1 TB tests against tbsim branch
+
+on:
+  workflow_dispatch:
+    inputs:
+      tbsim_branch:
+        description: "Branch, tag, or SHA from starsimhub/tbsim"
+        required: true
+        default: "main"
+      tbsim_repo:
+        description: "Owner/repo to test (forks supported)"
+        required: true
+        default: "starsimhub/tbsim"
+
+jobs:
+  phase1-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install tbsim from selected ref
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "tbsim @ git+https://github.com/${{ inputs.tbsim_repo }}.git@${{ inputs.tbsim_branch }}"
+          python -m pip install pytest pytest-env pytest-xdist
+
+      - name: Show installed package source
+        run: |
+          python - <<'PY'
+          import tbsim
+          print("Using tbsim from:", tbsim.__file__)
+          PY
+
+      - name: Run validation suite
+        env:
+          MPLBACKEND: Agg
+          SCIRIS_BACKEND: agg
+        run: |
+          python -m pytest tests/ -v --tb=short
