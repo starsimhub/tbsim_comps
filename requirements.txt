@@ -1,0 +1,7 @@
+# tbsim from GitHub — change @main to any branch, tag, or commit SHA
+tbsim @ git+https://github.com/starsimhub/tbsim.git@main
+
+# test harness
+pytest>=7.4
+pytest-env
+pytest-xdist

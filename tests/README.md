@@ -1,34 +1,33 @@
-# Phase 1 test runner
+# Validation tests
 
-This folder contains the standalone Phase 1 TB validation suite (`test_tb.py`).
+| File | Scope |
+|------|-------|
+| `test_sim.py` | Full `tbsim.Sim` integration — end-to-end runs, result oracles, reproducibility |
+| `test_sim_endemic.py` | Endemic TB with Tx/TPT — clearance, reinfection, golden prevalence trajectory |
+| `test_tb.py` | TB module unit/integration checks (state machine, rates, reinfection indexes) |
+| `test_tbsim_regressions.py` | Known upstream tbsim bugs — fail until fixed |
 
-## Run locally against installed `tbsim`
+## Install and run
 
 ```bash
-python -m pytest tests/test_tb.py -v --tb=short
+pip install -r requirements.txt
+python -m pytest tests/ -v --tb=short
 ```
 
-## Run locally against a branch under development
+Or use the helper:
 
-Use the helper script to clone and install a specific branch/tag/SHA from GitHub,
-then run the tests against that code:
+```bash
+scripts/run_tests.sh
+```
+
+## Run against a branch under development
 
 ```bash
 scripts/run_phase1_against_branch.sh <branch-or-sha> [owner/repo]
 ```
 
-Examples:
-
-```bash
-scripts/run_phase1_against_branch.sh main
-scripts/run_phase1_against_branch.sh fix-425-household-uid-filtering starsimhub/tbsim
-scripts/run_phase1_against_branch.sh my-feature yourname/tbsim
-```
-
-## Run in GitHub Actions
+## GitHub Actions
 
 Workflow: `.github/workflows/phase1-branch-tests.yml`
 
-Use **Run workflow** and provide:
-- `tbsim_branch`: branch/tag/SHA to test
-- `tbsim_repo`: repository slug (default `starsimhub/tbsim`)
+Use **Run workflow** and provide `tbsim_branch` and `tbsim_repo`.

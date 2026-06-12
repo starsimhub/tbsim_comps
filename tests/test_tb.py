@@ -188,19 +188,19 @@ def test_plot_returns_figure():
 
 
 def test_state_counts_sum_to_population():
-    """Sum of per-state counts must equal the live population at t=0 and t=final."""
+    """Living TB states must sum to the alive population at t=0 and t=final."""
     sim = make_tb_sim(n_agents=150, start=ss.date("2000-01-01"), stop=ss.date("2003-12-31"))
     sim.run()
     tb = tbsim.get_tb(sim)
-    n_now         = len(tb.sim.people)
-    total_final   = sum(tb.results[f"n_{s.name}"][-1] for s in TBS)
-    total_initial = sum(tb.results[f"n_{s.name}"][0]  for s in TBS)
-    assert total_final == n_now, (
-        f"Final state counts sum to {total_final}, expected {n_now}"
-    )
-    assert total_initial == 150, (
-        f"Initial state counts sum to {total_initial}, expected 150"
-    )
+    living_states = [s for s in TBS if s not in (TBS.DEAD, TBS.REMOVED)]
+
+    for ti in (0, -1):
+        living_count = sum(int(tb.results[f"n_{state.name}"][ti]) for state in living_states)
+        n_alive = int(sim.results.n_alive[ti]) if hasattr(sim.results, "n_alive") else len(sim.people)
+        assert living_count == n_alive, (
+            f"Living TB states sum to {living_count} at ti={ti}, "
+            f"expected alive population {n_alive}"
+        )
 
 
 def test_n_infectious_matches_infectious_states():
@@ -369,11 +369,15 @@ def test_on_treatment_consistent_with_state():
 
 
 def test_rr_reinfection_waning():
-    """Agents past their protection window must revert to rr_reinfection=1.0."""
+    """Agents whose protection has elapsed must show rr_reinfection=1.0 and wane=inf.
+
+    After waning, step() resets ti_rr_reinfection_wane to inf — so we identify
+    waned agents by that marker, not by comparing ti to the wane time.
+    """
     sim = make_tb_sim(
-        n_agents=200,
+        n_agents=500,
         start=ss.date("2000-01-01"),
-        stop=ss.date("2005-12-31"),
+        stop=ss.date("2008-12-31"),
         pars={
             "init_prev":                  ss.bernoulli(0.3),
             "beta":                       ss.peryear(0.5),
@@ -381,19 +385,141 @@ def test_rr_reinfection_waning():
             "rr_reinfection_rec":         0.21,
         },
     )
+    sim.pars.rand_seed = 1
     sim.run()
     tb      = tbsim.get_tb(sim)
     cleared = ss.uids(tb.state == TBS.CLEARED)
-    assert len(cleared) > 0, "Expected CLEARED agents after 5-year run"
-    waned   = cleared[tb.ti >= tb.ti_rr_reinfection_wane[cleared]]
-    if len(waned) > 0:
-        assert np.allclose(tb.rr_reinfection[waned], 1.0), (
-            "Agents past protection window must have rr_reinfection=1.0"
+    assert len(cleared) > 0, "Expected CLEARED agents after 8-year run"
+
+    wane_times = tb.ti_rr_reinfection_wane[cleared]
+    waned      = cleared[wane_times == np.inf]
+    protected  = cleared[np.isfinite(wane_times) & (tb.ti < wane_times)]
+
+    assert len(waned) > 0, (
+        "Expected some CLEARED agents to have completed reinfection protection "
+        "(ti_rr_reinfection_wane reset to inf after waning)"
+    )
+    assert np.allclose(tb.rr_reinfection[waned], 1.0), (
+        "Waned agents must have rr_reinfection=1.0"
+    )
+
+    if len(protected) > 0:
+        # INFECTION→CLEARED keeps rr_reinfection_cleared=1.0 even while protected;
+        # NON_INFECTIOUS→CLEARED should still carry rr_reinfection_rec=0.21.
+        reduced = protected[tb.rr_reinfection[protected] < 1.0]
+        assert len(reduced) > 0, (
+            "Expected some protected CLEARED agents with reduced rr_reinfection "
+            "(NON_INFECTIOUS recovery pathway)"
         )
-        assert np.all(tb.ti_rr_reinfection_wane[waned] == np.inf), (
-            "Waned agents must have ti_rr_reinfection_wane=inf"
-        )
-    return sim
+
+
+def test_rr_reinfection_cleared_from_infection():
+    """INFECTION→CLEARED must assign pars.rr_reinfection_cleared to new entrants."""
+    rr_cleared = 0.37
+    sim = make_tb_sim(
+        n_agents=100,
+        pars={
+            "beta": ss.peryear(0),
+            "init_prev": ss.bernoulli(0),
+            "inf_cle": ss.peryear(50),
+            "inf_non": ss.peryear(0),
+            "inf_asy": ss.peryear(0),
+            "rr_reinfection_cleared": rr_cleared,
+            "rr_reinfection_rec": 0.21,
+        },
+    )
+    sim.init()
+    tb   = tbsim.get_tb(sim)
+    uids = ss.uids(np.arange(100))
+    tb.state[uids]       = TBS.INFECTION
+    tb.infected[uids]    = True
+    tb.susceptible[uids] = False
+    tb.rr_reinfection[uids] = 1.0
+
+    tb.step()
+
+    cleared = uids[tb.state[uids] == TBS.CLEARED]
+    assert len(cleared) > 0, "Expected INFECTION agents to clear within one step"
+    assert np.allclose(tb.rr_reinfection[cleared], rr_cleared), (
+        f"INFECTION→CLEARED must set rr_reinfection_cleared={rr_cleared}, "
+        f"got {tb.rr_reinfection[cleared]}"
+    )
+
+
+def test_rr_reinfection_rec_from_non_infectious():
+    """NON_INFECTIOUS→CLEARED must assign pars.rr_reinfection_rec to new entrants."""
+    rr_rec = 0.44
+    sim = make_tb_sim(
+        n_agents=100,
+        pars={
+            "beta": ss.peryear(0),
+            "init_prev": ss.bernoulli(0),
+            "non_rec": ss.peryear(50),
+            "non_asy": ss.peryear(0),
+            "rr_reinfection_rec": rr_rec,
+            "rr_reinfection_cleared": 0.99,
+        },
+    )
+    sim.init()
+    tb   = tbsim.get_tb(sim)
+    uids = ss.uids(np.arange(100))
+    tb.state[uids]       = TBS.NON_INFECTIOUS
+    tb.infected[uids]    = True
+    tb.susceptible[uids] = False
+    tb.rr_reinfection[uids] = 1.0
+
+    tb.step()
+
+    cleared = uids[tb.state[uids] == TBS.CLEARED]
+    assert len(cleared) > 0, "Expected NON_INFECTIOUS agents to recover within one step"
+    assert np.allclose(tb.rr_reinfection[cleared], rr_rec), (
+        f"NON_INFECTIOUS→CLEARED must set rr_reinfection_rec={rr_rec}, "
+        f"got {tb.rr_reinfection[cleared]}"
+    )
+
+
+def test_rr_reinfection_treat_from_tx_success():
+    """Successful treatment must assign pars.rr_reinfection_treat on CLEARED exit."""
+    rr_treat = 2.77
+    sim = tbsim.Sim(
+        n_agents=30,
+        interventions=[
+            tbsim.DxDelivery(product=tbsim.Xpert()),
+            tbsim.TxDelivery(product=tbsim.DOTS()),
+        ],
+        sim_pars=dict(
+            start=ss.date("2000-01-01"),
+            stop=ss.date("2001-12-31"),
+            dt=ss.days(7),
+            verbose=0,
+        ),
+        tb_pars={
+            "beta": ss.peryear(0),
+            "init_prev": ss.bernoulli(0),
+            "rr_reinfection_treat": rr_treat,
+            "rr_reinfection_cleared": 0.15,
+            "rr_reinfection_rec": 0.25,
+        },
+    )
+    sim.init()
+    tb = tbsim.get_tb(sim)
+    tx = sim.interventions.txdelivery
+
+    uids = ss.uids([3, 7, 11, 15])
+    tb.state[uids]       = TBS.TREATMENT
+    tb.on_treatment[uids] = True
+    tb.infected[uids]    = True
+    tb.susceptible[uids] = False
+    tx._success = uids
+    tx.step_success()
+
+    assert np.all(tb.state[uids] == TBS.CLEARED), (
+        "Successful treatment must move agents to CLEARED"
+    )
+    assert np.allclose(tb.rr_reinfection[uids], rr_treat), (
+        f"TREATMENT success must set rr_reinfection_treat={rr_treat}, "
+        f"got {tb.rr_reinfection[uids]}"
+    )
 
 
 # =============================================================================
@@ -402,27 +528,44 @@ def test_rr_reinfection_waning():
 
 @sc.timer()
 def test_higher_beta_higher_prevalence(do_plot=do_plot):
-    """Higher beta must produce higher mean active-TB prevalence (1.3)."""
+    """Higher beta must produce more cumulative active cases across replicate seeds (1.3).
+
+    A single seed can tie when transmission is sparse. We run several seeds and
+    require the high-beta scenario to win on cumulative active cases in most runs.
+    """
     sc.heading('Testing higher beta → higher prevalence...')
-    common    = dict(n_agents=n_agents, start=ss.date('2000-01-01'), stop=ss.date('2008-12-31'))
-    base_pars = dict(init_prev=ss.bernoulli(0.15))
-    sim_lo = make_tb_sim(**common, pars={**base_pars, 'beta': ss.peryear(0.1)})
-    sim_hi = make_tb_sim(**common, pars={**base_pars, 'beta': ss.peryear(0.6)})
-    for sim in (sim_lo, sim_hi):
-        sim.pars.rand_seed = 42
-    sim_lo.run(); sim_hi.run()
-    prev_lo = float(np.mean(tbsim.get_tb(sim_lo).results['prevalence_active'][:]))
-    prev_hi = float(np.mean(tbsim.get_tb(sim_hi).results['prevalence_active'][:]))
-    assert prev_hi > prev_lo, (
-        f'Higher beta should raise mean prevalence; '
-        f'got hi={prev_hi:.4f} vs lo={prev_lo:.4f}'
+    common = dict(
+        n_agents=2_000,
+        start=ss.date('2000-01-01'),
+        stop=ss.date('2010-01-01'),
     )
-    if do_plot:
+    base_pars = dict(init_prev=ss.bernoulli(0.25))
+    beta_lo, beta_hi = ss.peryear(0.05), ss.peryear(0.8)
+
+    wins = 0
+    last_hi = None
+    for seed in range(1, 11):
+        sim_lo = make_tb_sim(**common, pars={**base_pars, 'beta': beta_lo})
+        sim_hi = make_tb_sim(**common, pars={**base_pars, 'beta': beta_hi})
+        sim_lo.pars.rand_seed = seed
+        sim_hi.pars.rand_seed = seed
+        sim_lo.run()
+        sim_hi.run()
+        cum_lo = float(tbsim.get_tb(sim_lo).results['cum_active'][-1])
+        cum_hi = float(tbsim.get_tb(sim_hi).results['cum_active'][-1])
+        if cum_hi > cum_lo:
+            wins += 1
+        last_hi = sim_hi
+
+    assert wins >= 8, (
+        f'Higher beta should raise cum_active in most seeds; '
+        f'high-beta won {wins}/10 paired runs'
+    )
+    if do_plot and last_hi is not None:
         plt.figure()
-        plt.plot(tbsim.get_tb(sim_lo).results['prevalence_active'][:], label='low beta')
-        plt.plot(tbsim.get_tb(sim_hi).results['prevalence_active'][:], label='high beta')
-        plt.legend(); plt.title('Higher beta → higher prevalence')
-    return sim_hi
+        plt.plot(tbsim.get_tb(last_hi).results['prevalence_active'][:], label='high beta (last seed)')
+        plt.legend()
+        plt.title('Higher beta → higher burden')
 
 
 @sc.timer()
@@ -606,40 +749,49 @@ def test_dead_agents_ejected_from_population():
 
 @sc.timer()
 def test_coarse_vs_fine_dt_agreement(do_plot=do_plot):
-    """Mean prevalence from dt=7d and dt=1d must agree within 50% (1.6).
+    """Mean prevalence from dt=7d and dt=1d must agree within 15% across seeds (1.6).
 
-    The 50% single-seed tolerance accommodates stochastic variance at low
-    prevalence. A real per-step rate-conversion bug (e.g., a weekly rate applied
-    without dt normalisation) would produce a ≥5x ratio and fail reliably.
+    Single-seed comparisons are too noisy at low prevalence. We average mean
+    prevalence across 10 paired seeds; a per-step rate bug would show up as a
+    large systematic gap (typically ≥5x), not seed-level scatter.
     """
     sc.heading('Testing dt sensitivity (7-day vs 1-day)...')
     kw = dict(
         n_agents=2_000,
         start=ss.date('2000-01-01'),
         stop=ss.date('2010-01-01'),
-        pars=dict(init_prev=ss.bernoulli(0.20), beta=ss.peryear(0.3)),
+        pars=dict(init_prev=ss.bernoulli(0.30), beta=ss.peryear(0.5)),
     )
-    sim_week = make_tb_sim(**kw, dt=ss.days(7))
-    sim_day  = make_tb_sim(**kw, dt=ss.days(1))
-    for sim in (sim_week, sim_day):
-        sim.pars.rand_seed = 55
-    sim_week.run(); sim_day.run()
-    p_week = float(np.mean(tbsim.get_tb(sim_week).results['prevalence_active'][:]))
-    p_day  = float(np.mean(tbsim.get_tb(sim_day).results['prevalence_active'][:]))
-    assert np.isclose(p_week, p_day, rtol=0.50), (
-        f'dt=7d prevalence ({p_week:.4f}) and dt=1d prevalence ({p_day:.4f}) '
-        f'differ by more than 50%. A genuine rate-conversion bug produces '
-        f'ratios of ≥5x; this discrepancy strongly indicates one.'
+
+    week_means = []
+    day_means  = []
+    last_week  = None
+    last_day   = None
+    for seed in range(1, 11):
+        sim_week = make_tb_sim(**kw, dt=ss.days(7))
+        sim_day  = make_tb_sim(**kw, dt=ss.days(1))
+        sim_week.pars.rand_seed = seed
+        sim_day.pars.rand_seed  = seed
+        sim_week.run()
+        sim_day.run()
+        week_means.append(float(np.mean(tbsim.get_tb(sim_week).results['prevalence_active'][:])))
+        day_means.append(float(np.mean(tbsim.get_tb(sim_day).results['prevalence_active'][:])))
+        last_week, last_day = sim_week, sim_day
+
+    avg_week = float(np.mean(week_means))
+    avg_day  = float(np.mean(day_means))
+    assert np.isclose(avg_week, avg_day, rtol=0.15), (
+        f'Aggregated mean prevalence differs between dt=7d ({avg_week:.4f}) '
+        f'and dt=1d ({avg_day:.4f}) by more than 15% across 10 seeds'
     )
-    if do_plot:
+    if do_plot and last_week is not None and last_day is not None:
         fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-        axes[0].plot(tbsim.get_tb(sim_week).results['prevalence_active'][:], label='dt=7d')
-        axes[0].plot(tbsim.get_tb(sim_day).results['prevalence_active'][:],  label='dt=1d')
-        axes[0].set_title('Prevalence by dt'); axes[0].legend()
-        axes[1].plot(np.cumsum(tbsim.get_tb(sim_week).results['new_active'][:]), label='dt=7d')
-        axes[1].plot(np.cumsum(tbsim.get_tb(sim_day).results['new_active'][:]),  label='dt=1d')
+        axes[0].plot(tbsim.get_tb(last_week).results['prevalence_active'][:], label='dt=7d')
+        axes[0].plot(tbsim.get_tb(last_day).results['prevalence_active'][:],  label='dt=1d')
+        axes[0].set_title('Prevalence by dt (last seed)'); axes[0].legend()
+        axes[1].plot(np.cumsum(tbsim.get_tb(last_week).results['new_active'][:]), label='dt=7d')
+        axes[1].plot(np.cumsum(tbsim.get_tb(last_day).results['new_active'][:]),  label='dt=1d')
         axes[1].set_title('Cumulative new active cases'); axes[1].legend()
-    return sim_week
 
 
 if __name__ == '__main__':

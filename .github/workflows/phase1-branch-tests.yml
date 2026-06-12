@@ -21,14 +21,6 @@ jobs:
       - name: Checkout this repository
         uses: actions/checkout@v4
 
-      - name: Checkout target tbsim ref
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ inputs.tbsim_repo }}
-          ref: ${{ inputs.tbsim_branch }}
-          path: tbsim-src
-          fetch-depth: 1
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -38,23 +30,19 @@ jobs:
       - name: Install tbsim from selected ref
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e "./tbsim-src"
+          python -m pip install "tbsim @ git+https://github.com/${{ inputs.tbsim_repo }}.git@${{ inputs.tbsim_branch }}"
           python -m pip install pytest pytest-env pytest-xdist
 
       - name: Show installed package source
         run: |
-          tmpdir="$(mktemp -d)"
-          cd "${tmpdir}"
           python - <<'PY'
           import tbsim
           print("Using tbsim from:", tbsim.__file__)
           PY
 
-      - name: Run Phase 1 suite
+      - name: Run validation suite
         env:
           MPLBACKEND: Agg
           SCIRIS_BACKEND: agg
         run: |
-          tmpdir="$(mktemp -d)"
-          cd "${tmpdir}"
-          python -m pytest "${GITHUB_WORKSPACE}/tests/test_tb.py" -v --tb=short
+          python -m pytest tests/ -v --tb=short

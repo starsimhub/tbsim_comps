@@ -1,19 +1,21 @@
 # tbsim_comps validation harness
 
-> Note: Implementation of the tests is in progress
-
 This repository contains an external test harness for validating `tbsim` from source branches, tags, or SHAs.
 
-The key goal is to run tests against the exact development version of `tbsim` you choose, rather than whatever is currently on `main`.
+Install the target `tbsim` version with `requirements.txt`, then run integration and unit tests that exercise the full `tbsim.Sim` API and TB module behavior.
 
 ## Repository layout
 
 - `tbsim/`  
   Reference checkout of the upstream package. Treat as read-only in this harness.
 - `tests/`  
-  Validation tests executed by this harness (for example `tests/test_tb.py`).
+  Validation tests (`tests/test_sim.py` for full Sim runs, `tests/test_tb.py` for TB module checks).
+- `requirements.txt`  
+  Pins `tbsim` to a Git ref plus pytest dependencies.
+- `scripts/run_tests.sh`  
+  Install from `requirements.txt` and run the full suite.
 - `scripts/run_phase1_against_branch.sh`  
-  Local helper to clone/install a target branch and run tests.
+  Install a specific branch via pip and run tests.
 - `.github/workflows/phase1-branch-tests.yml`  
   GitHub Actions workflow to run the same branch-based test flow in CI.
 
@@ -26,10 +28,22 @@ The key goal is to run tests against the exact development version of `tbsim` yo
 
 ## Quick start (local)
 
-Run the test suite currently in `tests/` using your current environment:
+Install dependencies and run the full suite:
 
 ```bash
-python -m pytest tests/test_tb.py -v --tb=short
+scripts/run_tests.sh
+```
+
+Or, if you have already installed from `requirements.txt`:
+
+```bash
+python -m pytest tests/ -v --tb=short
+```
+
+Confirm which `tbsim` package is imported:
+
+```bash
+python -c "import tbsim; print(tbsim.__file__)"
 ```
 
 ## Run tests against a specific branch
@@ -50,10 +64,9 @@ scripts/run_phase1_against_branch.sh my-feature yourname/tbsim
 
 What the script does:
 
-1. Clones the selected ref into `.tmp/tbsim-src`
-2. Installs `tbsim` editable from that clone
-3. Prints the import path so you can confirm which source is under test
-4. Runs the test suite from `tests/`
+1. Installs `tbsim` from the selected Git ref via pip
+2. Prints the import path so you can confirm which source is under test
+3. Runs the test suite from `tests/`
 
 ## Run in GitHub Actions
 
@@ -73,37 +86,39 @@ How to run:
 
 The workflow installs `tbsim` from the selected ref and runs the local harness tests against that installed version.
 
-## Why the runner uses a temp directory
+## Import shadowing
 
-Python import resolution can accidentally pick up the local reference checkout (`./tbsim`) instead of the installed target package.
-
-To avoid false results, both local and CI runners execute pytest from a temporary directory and pass the test file path explicitly.
+If a local reference checkout exists at `./tbsim/`, Python may import that folder instead of the pip-installed package. Always check `tbsim.__file__` before trusting results.
 
 ## Common commands
 
-Run branch-based validation locally:
+Install and run everything:
+
+```bash
+scripts/run_tests.sh
+```
+
+Run only Sim integration tests:
+
+```bash
+python -m pytest tests/test_sim.py -v --tb=short
+```
+
+Run branch-based validation:
 
 ```bash
 scripts/run_phase1_against_branch.sh feature-branch starsimhub/tbsim
-```
-
-Run direct pytest locally:
-
-```bash
-python -m pytest tests/test_tb.py -v --tb=short
-```
-
-Show which `tbsim` is currently imported:
-
-```bash
-python -c "import tbsim; print(tbsim.__file__)"
 ```
 
 ## Troubleshooting
 
 ### Import mismatch (wrong package under test)
 
-If the printed path does not point to `.tmp/tbsim-src/tbsim/__init__.py`, your environment may still be using a previously installed package.
+If the printed path points at `./tbsim/` in this repo, or an unexpected site-packages path, reinstall:
+
+```bash
+pip install -r requirements.txt --force-reinstall
+```
 
 Re-run:
 
