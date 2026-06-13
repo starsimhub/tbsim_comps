@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+.tmp/sample-report/artifacts/junit.xml
+.tmp/sample-report/artifacts/pytest-report.html
+.tmp/sample-report/site/history.json
+.tmp/sample-report/site/index.html
+.tmp/sample-report/site/README.txt
+.tmp/sample-report/site/runs/local-sample/index.html
+.tmp/sample-report/site/runs/local-sample/junit.xml
+.tmp/sample-report/site/runs/local-sample/pytest-report.html
