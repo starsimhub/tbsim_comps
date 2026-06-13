@@ -8,11 +8,39 @@ import datetime as dt
 import html
 import json
 from pathlib import Path
+import re
 import textwrap
 import xml.etree.ElementTree as ET
 
 
+def _infer_file_from_classname(classname: str) -> str:
+    if not classname:
+        return ""
+    return f"{classname.replace('.', '/')}.py"
+
+
+def _infer_source_from_detail(detail: str, fallback_file: str, fallback_line: str) -> tuple[str, str]:
+    match = re.search(r"(tests/[^:\s]+\.py):(\d+)", detail)
+    if match:
+        return match.group(1), match.group(2)
+    return fallback_file, fallback_line
+
+
 def _parse_junit(junit_path: Path) -> tuple[list[dict], dict]:
+    if not junit_path.exists():
+        return [
+            {
+                "id": "workflow::pytest-results",
+                "classname": "workflow",
+                "name": "pytest-results",
+                "status": "error",
+                "file": "",
+                "line": "",
+                "duration": 0.0,
+                "detail": f"JUnit XML was not found at {junit_path}. The test command may not have started or may have failed before pytest wrote results.",
+            }
+        ], {"total": 1, "passed": 0, "failed": 0, "error": 1, "skipped": 0}
+
     tree = ET.parse(junit_path)
     root = tree.getroot()
 
@@ -22,7 +50,7 @@ def _parse_junit(junit_path: Path) -> tuple[list[dict], dict]:
     for case in root.iter("testcase"):
         classname = case.attrib.get("classname", "").strip()
         name = case.attrib.get("name", "").strip()
-        file_path = case.attrib.get("file", "").strip()
+        file_path = case.attrib.get("file", "").strip() or _infer_file_from_classname(classname)
         line = case.attrib.get("line", "").strip()
         duration = float(case.attrib.get("time", "0") or 0)
 
@@ -43,6 +71,8 @@ def _parse_junit(junit_path: Path) -> tuple[list[dict], dict]:
         elif skipped is not None:
             status = "skipped"
             detail = (skipped.text or skipped.attrib.get("message", "")).strip()
+
+        file_path, line = _infer_source_from_detail(detail, file_path, line)
 
         summary["total"] += 1
         summary[status] += 1
@@ -131,10 +161,19 @@ def _render_run_page(
                 "</section>"
             )
 
-    pytest_html_link = (
-        f"<a class='button' href='{html.escape(pytest_report_relpath)}'>Open rich pytest-html report</a>"
+    rich_report_panel = (
+        "<details class='card rich-report' open>"
+        "<summary><span>Rich pytest report</span><small>Click to collapse</small></summary>"
+        f"<iframe src='{html.escape(pytest_report_relpath)}' title='Rich pytest-html report'></iframe>"
+        f"<p><a class='button' href='{html.escape(pytest_report_relpath)}'>Open rich report in a new tab</a></p>"
+        "</details>"
         if pytest_report_relpath
-        else ""
+        else (
+            "<section class='card rich-report empty'>"
+            "<h2>Rich pytest report unavailable</h2>"
+            "<p>The pytest-html artifact was not produced for this run.</p>"
+            "</section>"
+        )
     )
 
     fail_list = "".join(
@@ -152,24 +191,39 @@ def _render_run_page(
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Test Run {html.escape(run_meta["run_id"])} - {html.escape(run_meta["workflow"])}</title>
   <style>
-    body {{ font-family: Inter, ui-sans-serif, system-ui, sans-serif; margin: 0; background:#0b1020; color:#e6edf3; }}
-    .wrap {{ max-width: 1200px; margin: 0 auto; padding: 24px; }}
-    .grid {{ display:grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 12px; }}
-    .card {{ background:#111827; border:1px solid #334155; border-radius:12px; padding:16px; margin-top: 14px; }}
-    .badge {{ font-size: 12px; border-radius: 999px; padding: 3px 10px; font-weight: 600; text-transform: uppercase; }}
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap');
+    :root {{ color-scheme: dark; --bg:#070b16; --panel:rgba(15,23,42,.74); --panel-strong:rgba(15,23,42,.92); --border:rgba(148,163,184,.22); --text:#e5eefb; --muted:#9fb0c6; --accent:#7dd3fc; --accent-strong:#2563eb; }}
+    * {{ box-sizing: border-box; }}
+    body {{ font-family: Inter, ui-sans-serif, system-ui, sans-serif; margin: 0; background: radial-gradient(circle at 15% 0%, rgba(59,130,246,.24), transparent 32rem), radial-gradient(circle at 85% 10%, rgba(14,165,233,.18), transparent 28rem), linear-gradient(180deg, #020617, var(--bg)); color:var(--text); }}
+    .wrap {{ max-width: 1320px; margin: 0 auto; padding: 28px; }}
+    h1 {{ font-size: clamp(2rem, 4vw, 4rem); letter-spacing: -.055em; margin: 10px 0 4px; }}
+    h2 {{ font-size: 1.05rem; letter-spacing: -.02em; }}
+    .subnav {{ color: var(--muted); margin-bottom: 18px; }}
+    .grid {{ display:grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 14px; }}
+    .card {{ background:linear-gradient(180deg, var(--panel), rgba(15,23,42,.56)); border:1px solid var(--border); border-radius:18px; padding:18px; margin-top: 16px; box-shadow: 0 18px 55px rgba(2,6,23,.32); backdrop-filter: blur(18px); }}
+    .grid .card p {{ font-size: 2rem; font-weight: 800; margin: 0; letter-spacing: -.05em; }}
+    .badge {{ font-size: 11px; border-radius: 999px; padding: 4px 10px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }}
     table {{ width:100%; border-collapse: collapse; }}
-    th, td {{ text-align:left; border-bottom:1px solid #334155; padding: 8px; font-size: 14px; vertical-align: top; }}
-    a {{ color:#93c5fd; text-decoration: none; }}
+    th, td {{ text-align:left; border-bottom:1px solid rgba(148,163,184,.18); padding: 10px 8px; font-size: 14px; vertical-align: top; }}
+    th {{ color:#b8c7dc; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }}
+    a {{ color:var(--accent); text-decoration: none; }}
     a:hover {{ text-decoration: underline; }}
-    .button {{ display:inline-block; margin: 8px 0 0; background:#1d4ed8; color:white; padding:8px 12px; border-radius:8px; }}
-    pre {{ white-space: pre-wrap; background:#020617; border-radius:8px; padding:12px; border:1px solid #334155; overflow-x:auto; }}
+    .button {{ display:inline-block; margin: 8px 0 0; background:linear-gradient(135deg, var(--accent-strong), #0891b2); color:white; padding:10px 14px; border-radius:12px; font-weight:700; box-shadow: 0 10px 30px rgba(37,99,235,.26); }}
+    pre {{ font-family:'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; background:#020617; border-radius:14px; padding:14px; border:1px solid var(--border); overflow-x:auto; }}
+    .rich-report {{ padding: 0; overflow: hidden; }}
+    .rich-report summary {{ cursor:pointer; list-style:none; display:flex; align-items:center; justify-content:space-between; gap: 16px; padding: 16px 18px; border-bottom:1px solid var(--border); font-weight:800; letter-spacing:-.02em; }}
+    .rich-report summary::-webkit-details-marker {{ display:none; }}
+    .rich-report summary small {{ color:var(--muted); font-weight:600; letter-spacing:0; }}
+    .rich-report iframe {{ display:block; width:100%; min-height: 780px; border:0; background:#fff; }}
+    .rich-report p {{ margin: 12px 18px 18px; }}
+    .empty {{ padding: 18px; }}
   </style>
 </head>
 <body>
   <div class="wrap">
     <h1>Run #{html.escape(str(run_meta["run_number"]))} (attempt {html.escape(str(run_meta["run_attempt"]))})</h1>
-    <p><a href="../../index.html">Back to dashboard</a> · <a href="{html.escape(run_meta["run_url"])}">GitHub Actions run</a></p>
-    {pytest_html_link}
+    <p class="subnav"><a href="../../index.html">Back to dashboard</a> · <a href="{html.escape(run_meta["run_url"])}">GitHub Actions run</a></p>
+    {rich_report_panel}
     <div class="grid">
       <div class="card"><h2>Total</h2><p>{run_meta["summary"]["total"]}</p></div>
       <div class="card"><h2>Passed</h2><p>{by_status["passed"]}</p></div>
@@ -275,20 +329,24 @@ def _render_dashboard(site_dir: Path, runs: list[dict]) -> None:
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>tbsim validation dashboard</title>
   <style>
-    :root {{ color-scheme: dark; }}
-    body {{ font-family: Inter, ui-sans-serif, system-ui, sans-serif; margin: 0; background: linear-gradient(180deg, #030712, #0f172a); color:#e2e8f0; }}
-    .wrap {{ max-width: 1400px; margin: 0 auto; padding: 24px; }}
-    .hero {{ background: rgba(15, 23, 42, 0.7); border:1px solid #334155; border-radius: 14px; padding: 20px; }}
-    h1, h2 {{ margin: 8px 0 12px; }}
-    p {{ color:#cbd5e1; }}
-    .badge {{ font-size: 12px; border-radius: 999px; padding: 3px 10px; font-weight: 600; text-transform: uppercase; }}
-    .card {{ background: rgba(15, 23, 42, 0.72); border:1px solid #334155; border-radius: 12px; padding: 16px; margin-top: 14px; }}
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap');
+    :root {{ color-scheme: dark; --bg:#070b16; --panel:rgba(15,23,42,.74); --border:rgba(148,163,184,.22); --text:#e5eefb; --muted:#9fb0c6; --accent:#7dd3fc; }}
+    * {{ box-sizing: border-box; }}
+    body {{ font-family: Inter, ui-sans-serif, system-ui, sans-serif; margin: 0; background: radial-gradient(circle at 15% 0%, rgba(59,130,246,.24), transparent 32rem), radial-gradient(circle at 85% 10%, rgba(14,165,233,.18), transparent 28rem), linear-gradient(180deg, #020617, var(--bg)); color:var(--text); }}
+    .wrap {{ max-width: 1440px; margin: 0 auto; padding: 28px; }}
+    .hero {{ background:linear-gradient(135deg, rgba(30,41,59,.88), rgba(15,23,42,.72)); border:1px solid var(--border); border-radius: 22px; padding: 26px; box-shadow: 0 24px 70px rgba(2,6,23,.36); backdrop-filter: blur(18px); }}
+    h1 {{ font-size: clamp(2.2rem, 4vw, 4.6rem); letter-spacing: -.06em; margin: 6px 0 10px; }}
+    h2 {{ margin: 8px 0 12px; letter-spacing: -.025em; }}
+    p {{ color:var(--muted); }}
+    .badge {{ font-size: 11px; border-radius: 999px; padding: 4px 10px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }}
+    .card {{ background:linear-gradient(180deg, var(--panel), rgba(15,23,42,.56)); border:1px solid var(--border); border-radius: 18px; padding: 18px; margin-top: 16px; box-shadow: 0 18px 55px rgba(2,6,23,.32); backdrop-filter: blur(18px); }}
     table {{ width:100%; border-collapse: collapse; }}
-    th, td {{ text-align:left; border-bottom:1px solid #334155; padding: 8px; font-size: 13px; }}
-    a {{ color:#93c5fd; text-decoration: none; }}
+    th, td {{ text-align:left; border-bottom:1px solid rgba(148,163,184,.18); padding: 10px 8px; font-size: 13px; }}
+    th {{ color:#b8c7dc; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }}
+    a {{ color:var(--accent); text-decoration: none; }}
     a:hover {{ text-decoration: underline; }}
     .matrix {{ overflow-x: auto; }}
-    .dot {{ width: 11px; height: 11px; border-radius: 999px; display: inline-block; }}
+    .dot {{ width: 12px; height: 12px; border-radius: 999px; display: inline-block; box-shadow: 0 0 0 3px rgba(255,255,255,.05); }}
     .small th, .small td {{ padding: 6px; font-size: 12px; }}
   </style>
 </head>
@@ -351,7 +409,16 @@ def main() -> None:
 
     # Copy raw artifacts for direct inspection.
     junit_target = run_dir / "junit.xml"
-    junit_target.write_text(args.junit.read_text(encoding="utf-8"), encoding="utf-8")
+    if args.junit.exists():
+        junit_target.write_text(args.junit.read_text(encoding="utf-8"), encoding="utf-8")
+    else:
+        junit_target.write_text(
+            "<testsuites><testsuite errors='1' failures='0' skipped='0' tests='1'>"
+            "<testcase classname='workflow' name='pytest-results'>"
+            "<error message='JUnit XML was not produced'>The pytest JUnit XML artifact was not found.</error>"
+            "</testcase></testsuite></testsuites>\n",
+            encoding="utf-8",
+        )
 
     pytest_html_relpath = None
     if args.pytest_html and args.pytest_html.exists():
