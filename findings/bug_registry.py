@@ -88,6 +88,107 @@ BUGS: list[dict] = [
             "and default ``rr_reinfection_cleared=1.0``; cleared agents get finite wane times."
         ),
     },
+    {
+        "id": "TBUG-005",
+        "title": "DxDelivery tests all alive agents when HealthSeekingBehavior is absent",
+        "severity": "high",
+        "status": "open",
+        "test": "test_dx_delivery_requires_hsb_sought_care_by_default",
+        "module": "tbsim.interventions.diagnostics",
+        "symptom": (
+            "A default ``DxDelivery`` with no ``HealthSeekingBehavior`` tests every "
+            "alive agent each step because ``_get_eligible()`` falls back to all alive."
+        ),
+        "expected": (
+            "Default eligibility should require ``sought_care`` or fail loudly when "
+            "the HSB dependency is missing; mass screening should require explicit "
+            "custom eligibility."
+        ),
+        "repro": (
+            "Run ``tbsim.Sim`` with only ``DxDelivery(CAD(), coverage=1.0)`` and no HSB; "
+            "``sum(dx.results.n_tested)`` is nonzero."
+        ),
+    },
+    {
+        "id": "TBUG-006",
+        "title": "Diagnostic products cannot be administered in isolation after init",
+        "severity": "medium",
+        "status": "open",
+        "test": "test_dx_product_administer_works_after_product_initialization",
+        "module": "tbsim.interventions.diagnostics",
+        "symptom": (
+            "Calling ``Xpert().administer(sim, uids)`` after ``init_pre/init_post`` "
+            "raises ``DistNotInitializedError`` from an internal ``choice2d`` draw."
+        ),
+        "expected": (
+            "Diagnostic products should be directly unit-testable after standard product "
+            "initialization, or expose a documented initialization helper for administer()."
+        ),
+        "repro": (
+            "Initialize a small ``tbsim.Sim``, call ``product = Xpert(); "
+            "product.init_pre(sim); product.init_post(); product.administer(sim, uids)``."
+        ),
+    },
+    {
+        "id": "TBUG-007",
+        "title": "Treatment products cannot be administered in isolation after init",
+        "severity": "medium",
+        "status": "open",
+        "test": "test_tx_product_administer_works_after_product_initialization",
+        "module": "tbsim.interventions.treatments",
+        "symptom": (
+            "Calling ``DOTS().administer(sim, uids)`` after ``init_pre/init_post`` "
+            "raises ``DistNotInitializedError`` from internal Bernoulli distributions."
+        ),
+        "expected": (
+            "Treatment products should be directly unit-testable after standard product "
+            "initialization, or expose a documented initialization helper for administer()."
+        ),
+        "repro": (
+            "Initialize a small ``tbsim.Sim``, call ``product = DOTS(); "
+            "product.init_pre(sim); product.init_post(); product.administer(sim, uids)``."
+        ),
+    },
+    {
+        "id": "TBUG-008",
+        "title": "Xpert diagnostic scenarios lack prior-TB-history stratification",
+        "severity": "medium",
+        "status": "open",
+        "test": "test_xpert_prior_tb_history_strata_are_explicit",
+        "module": "tbsim.interventions.diagnostics",
+        "symptom": (
+            "``Xpert`` probability tables stratify by age and TB state but have no "
+            "dimension for prior TB, recent prior TB, or previous treatment history."
+        ),
+        "expected": (
+            "Diagnostic scenarios that use prior-treatment history should expose an "
+            "explicit table dimension or scenario flag so assumptions are not silent."
+        ),
+        "repro": (
+            "Inspect ``tbsim.Xpert().df.columns``; no prior-TB-history column exists."
+        ),
+    },
+    {
+        "id": "TBUG-009",
+        "title": "DR-TB second-line treatment outputs are not separable",
+        "severity": "medium",
+        "status": "open",
+        "test": "test_dr_tb_secondline_outputs_are_separable",
+        "module": "tbsim.interventions.treatments",
+        "symptom": (
+            "``SecondLine`` treatment can be delivered, but outcomes are reported only "
+            "through generic ``TxDelivery`` result names, with no DR/MDR/resistance-specific "
+            "state or output channel."
+        ),
+        "expected": (
+            "DR-TB scenarios should have explicit assumption flags and separable outputs "
+            "so drug-resistant and drug-susceptible treatment outcomes are not conflated."
+        ),
+        "repro": (
+            "Run ``TxDelivery(SecondLine())`` and inspect ``tx.results.keys()``; only "
+            "generic treatment result channels are present."
+        ),
+    },
 ]
 
 OPEN_BUGS = [b for b in BUGS if b["status"] == "open"]

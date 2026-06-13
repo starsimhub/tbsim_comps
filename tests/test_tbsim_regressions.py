@@ -180,5 +180,151 @@ def test_reinfection_protection_applies_rr_when_rr_cleared_below_one():
     )
 
 
+@pytest.mark.tbsim_bug
+def test_dx_delivery_requires_hsb_sought_care_by_default():
+    """TBUG-005: DxDelivery alone must not test everyone when no one sought care."""
+    sim = tbsim.Sim(
+        sim_pars=dict(
+            n_agents=50,
+            start=ss.date("2000-01-01"),
+            stop=ss.date("2000-02-01"),
+            dt=ss.days(7),
+            rand_seed=1,
+            verbose=0,
+        ),
+        tb_pars=dict(beta=ss.peryear(0), init_prev=ss.bernoulli(0)),
+        pars=dict(interventions=[tbsim.DxDelivery(tbsim.CAD(), coverage=1.0)]),
+    )
+    sim.run()
+    dx = next(iter(sim.interventions.values()))
+    n_tested = int(np.sum(dx.results.n_tested))
+    bug = _bug_id("test_dx_delivery_requires_hsb_sought_care_by_default")
+    assert n_tested == 0, (
+        f"{bug}: DxDelivery default eligibility must require sought_care when no "
+        f"custom eligibility is supplied; got {n_tested} tests without HSB"
+    )
+
+
+@pytest.mark.tbsim_bug
+def test_dx_product_administer_works_after_product_initialization():
+    """TBUG-006: Diagnostic products must be unit-testable via administer()."""
+    sim = tbsim.Sim(
+        sim_pars=dict(
+            n_agents=20,
+            start=ss.date("2000-01-01"),
+            stop=ss.date("2000-02-01"),
+            dt=ss.days(7),
+            rand_seed=2,
+            verbose=0,
+        ),
+        tb_pars=dict(beta=ss.peryear(0), init_prev=ss.bernoulli(0)),
+    )
+    sim.init()
+    tb = sim.get_tb()
+    uids = sim.people.auids[:10]
+    tb.state[uids] = TBS.SYMPTOMATIC
+    sim.people.age[uids] = 30
+
+    product = tbsim.Xpert()
+    product.init_pre(sim)
+    product.init_post()
+    results = product.administer(sim, uids)
+
+    assert set(results) == {"positive", "negative"}, (
+        f"{_bug_id('test_dx_product_administer_works_after_product_initialization')}: "
+        "Xpert.administer() must return positive/negative UID partitions after product init"
+    )
+
+
+@pytest.mark.tbsim_bug
+def test_tx_product_administer_works_after_product_initialization():
+    """TBUG-007: Treatment products must be unit-testable via administer()."""
+    sim = tbsim.Sim(
+        sim_pars=dict(
+            n_agents=20,
+            start=ss.date("2000-01-01"),
+            stop=ss.date("2000-02-01"),
+            dt=ss.days(7),
+            rand_seed=3,
+            verbose=0,
+        ),
+        tb_pars=dict(beta=ss.peryear(0), init_prev=ss.bernoulli(0)),
+    )
+    sim.init()
+    uids = sim.people.auids[:10]
+
+    product = tbsim.DOTS()
+    product.init_pre(sim)
+    product.init_post()
+    results = product.administer(sim, uids)
+
+    assert set(results) == {"success", "failure", "relapse"}, (
+        f"{_bug_id('test_tx_product_administer_works_after_product_initialization')}: "
+        "DOTS.administer() must return success/failure/relapse UID partitions after product init"
+    )
+
+
+@pytest.mark.tbsim_bug
+def test_xpert_prior_tb_history_strata_are_explicit():
+    """TBUG-008: Xpert scenarios must expose prior-TB-history strata explicitly."""
+    product = tbsim.Xpert()
+    prior_history_columns = {
+        "prior_tb",
+        "previous_tb",
+        "recent_prior_tb",
+        "years_since_tb",
+        "prior_treatment",
+    }
+    present = prior_history_columns.intersection(set(product.df.columns))
+    bug = _bug_id("test_xpert_prior_tb_history_strata_are_explicit")
+    assert present, (
+        f"{bug}: Xpert diagnostic table has no prior-TB-history dimension; "
+        f"columns are {list(product.df.columns)}"
+    )
+
+
+@pytest.mark.tbsim_bug
+def test_dr_tb_secondline_outputs_are_separable():
+    """TBUG-009: DR-TB second-line treatment scenarios need explicit outputs."""
+    dx = tbsim.DxDelivery(
+        tbsim.CAD(),
+        coverage=1.0,
+        eligibility=lambda sim: sim.people.auids[:80],
+    )
+    tx = tbsim.TxDelivery(tbsim.SecondLine(dur_treatment=ss.constant(v=14)))
+    sim = tbsim.Sim(
+        sim_pars=dict(
+            n_agents=100,
+            start=ss.date("2000-01-01"),
+            stop=ss.date("2000-06-01"),
+            dt=ss.days(7),
+            rand_seed=4,
+            verbose=0,
+        ),
+        tb_pars=dict(beta=ss.peryear(0), init_prev=ss.bernoulli(0)),
+        pars=dict(interventions=[dx, tx]),
+    )
+    sim.init()
+    tb = sim.get_tb()
+    uids = sim.people.auids[:80]
+    tb.state[uids] = TBS.SYMPTOMATIC
+    tb.susceptible[uids] = False
+    tb.infected[uids] = True
+    sim.run()
+
+    tx = next(i for i in sim.interventions.values() if isinstance(i, tbsim.TxDelivery))
+    result_keys = set(tx.results.keys())
+    separable = any(
+        token in key.lower()
+        for key in result_keys
+        for token in ["dr", "mdr", "resistant", "secondline", "second_line"]
+    )
+    bug = _bug_id("test_dr_tb_secondline_outputs_are_separable")
+    assert separable, (
+        f"{bug}: SecondLine treatment outcomes are only reported through generic "
+        f"TxDelivery result keys {sorted(result_keys)}"
+    )
+
+
 if __name__ == "__main__":
     pytest.main(["-x", "-v", __file__])
