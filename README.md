@@ -8,16 +8,22 @@ Install the target `tbsim` version with `requirements.txt`, then run integration
 
 - `tbsim/`  
   Reference checkout of the upstream package. Treat as read-only in this harness.
+- `findings/`  
+  Upstream defect registry (`TBSIM_KNOWN_BUGS.md`, `bug_registry.py`).
 - `tests/`  
-  Validation tests (`tests/test_sim.py` for full Sim runs, `tests/test_tb.py` for TB module checks).
+  Validation tests (`tests/test_sim.py`, `tests/test_tb.py`, `tests/test_tbsim_regressions.py`).
+- `scripts/report_tbsim_bugs.sh`  
+  Team triage report: open TBUG-xxx list + regression test run.
 - `requirements.txt`  
   Pins `tbsim` to a Git ref plus pytest dependencies.
 - `scripts/run_tests.sh`  
   Install from `requirements.txt` and run the full suite.
 - `scripts/run_phase1_against_branch.sh`  
   Install a specific branch via pip and run tests.
-- `.github/workflows/phase1-branch-tests.yml`  
-  GitHub Actions workflow to run the same branch-based test flow in CI.
+- `.github/workflows/validation-tests.yml`  
+  GitHub Actions workflow to run the same branch-based test flow in CI and publish test reports to GitHub Pages.
+- `scripts/generate_pages_report.py`  
+  Builds the historical GitHub Pages dashboard from pytest JUnit + pytest-html outputs.
 
 ## Prerequisites
 
@@ -39,6 +45,22 @@ Or, if you have already installed from `requirements.txt`:
 ```bash
 python -m pytest tests/ -v --tb=short
 ```
+
+## Upstream bug tracking
+
+Regression tests in `tests/test_tbsim_regressions.py` encode known `tbsim` defects
+(**TBUG-001** … **TBUG-004**). They are **expected to fail** on current `main` until
+upstream fixes land. Details and repro steps: `findings/TBSIM_KNOWN_BUGS.md`.
+
+```bash
+# Team triage: print open bugs + run regression tests
+scripts/report_tbsim_bugs.sh
+
+# Only upstream regressions
+python -m pytest tests/test_tbsim_regressions.py -m tbsim_bug -v
+```
+
+When filing issues on `starsimhub/tbsim`, use the **TBUG-xxx** ID in the title.
 
 Confirm which `tbsim` package is imported:
 
@@ -72,12 +94,12 @@ What the script does:
 
 Workflow file:
 
-- `.github/workflows/phase1-branch-tests.yml`
+- `.github/workflows/validation-tests.yml`
 
 How to run:
 
 1. Open **Actions** in GitHub
-2. Select **Phase 1 TB tests against tbsim branch**
+2. Select **tbsim validation tests**
 3. Click **Run workflow**
 4. Fill inputs:
    - `tbsim_branch`: branch, tag, or SHA to test
@@ -85,6 +107,14 @@ How to run:
 5. Start the run and review logs/artifacts
 
 The workflow installs `tbsim` from the selected ref and runs the local harness tests against that installed version.
+
+After each run (pass or fail), CI also publishes a GitHub Pages dashboard with:
+
+- per-run rich HTML report (`pytest-html`)
+- failing/error test tracebacks
+- links to GitHub Actions run and source test location
+- historical run table
+- full test status history across prior executions
 
 ## Import shadowing
 

@@ -1,0 +1,103 @@
+name: tbsim validation tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      tbsim_branch:
+        description: "Branch, tag, or SHA from starsimhub/tbsim"
+        required: true
+        default: "main"
+      tbsim_repo:
+        description: "Owner/repo to test (forks supported)"
+        required: true
+        default: "starsimhub/tbsim"
+
+permissions:
+  contents: write
+
+jobs:
+  phase1-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Checkout gh-pages branch (for report history)
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          ref: gh-pages
+          path: existing-pages
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install tbsim from selected ref
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "tbsim @ git+https://github.com/${{ inputs.tbsim_repo }}.git@${{ inputs.tbsim_branch }}"
+          python -m pip install pytest pytest-env pytest-xdist pytest-html
+
+      - name: Show installed package source
+        run: |
+          python - <<'PY'
+          import tbsim
+          print("Using tbsim from:", tbsim.__file__)
+          PY
+
+      - name: Run validation suite
+        id: tests
+        continue-on-error: true
+        env:
+          MPLBACKEND: Agg
+          SCIRIS_BACKEND: agg
+        run: |
+          mkdir -p artifacts
+          python -m pytest tests/ -v --tb=short \
+            --junitxml=artifacts/junit.xml \
+            --html=artifacts/pytest-report.html \
+            --self-contained-html
+
+      - name: Seed publish directory from existing gh-pages content
+        if: always()
+        run: |
+          mkdir -p gh-pages-site
+          if [ -d existing-pages ]; then
+            cp -R existing-pages/. gh-pages-site/ || true
+          fi
+
+      - name: Generate GitHub Pages dashboard
+        if: always()
+        run: |
+          python scripts/generate_pages_report.py \
+            --junit artifacts/junit.xml \
+            --site-dir gh-pages-site \
+            --existing-history gh-pages-site/history.json \
+            --pytest-html artifacts/pytest-report.html \
+            --run-id "${{ github.run_id }}" \
+            --run-number "${{ github.run_number }}" \
+            --run-attempt "${{ github.run_attempt }}" \
+            --workflow "${{ github.workflow }}" \
+            --repo "${{ github.repository }}" \
+            --sha "${{ github.sha }}" \
+            --ref-name "${{ github.ref_name }}" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      - name: Deploy report to GitHub Pages
+        if: always()
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: gh-pages-site
+          keep_files: true
+          force_orphan: false
+
+      - name: Fail workflow when tests fail
+        if: steps.tests.outcome == 'failure'
+        run: exit 1
