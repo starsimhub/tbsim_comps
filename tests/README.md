@@ -4,6 +4,8 @@
 |------|-------|
 | `test_sim.py` | Full `tbsim.Sim` integration — end-to-end runs, result oracles, reproducibility |
 | `test_sim_endemic.py` | Endemic TB with Tx/TPT — clearance, reinfection, golden prevalence trajectory |
+| `test_interventions.py` | Phase 2 intervention unit/integration checks — diagnostics, HSB, Tx, BCG, TPT, BetaByYear |
+| `test_scenarios.py` | Scientific scenario validations — care cascade, BCG, TPT, beta reduction |
 | `test_tb.py` | TB module unit/integration checks (state machine, rates, reinfection indexes) |
 | `test_tbsim_regressions.py` | **Upstream bug regressions** (TBUG-001 … TBUG-004); fail until fixed |
 
