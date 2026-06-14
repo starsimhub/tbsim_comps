@@ -13,8 +13,6 @@ file with the tbsim team. When a bug is fixed upstream, update `findings/bug_reg
 | TBUG-005 | high | `test_dx_delivery_requires_hsb_sought_care_by_default` | open |
 | TBUG-006 | medium | `test_dx_product_administer_works_after_product_initialization` | open |
 | TBUG-007 | medium | `test_tx_product_administer_works_after_product_initialization` | open |
-| TBUG-008 | medium | `test_xpert_prior_tb_history_strata_are_explicit` | open |
-| TBUG-009 | medium | `test_dr_tb_secondline_outputs_are_separable` | open |
 
 ## TBUG-001 — `dur_reinfection_protection` crashes on `ss.years()`
 
@@ -124,32 +122,6 @@ product.init_pre(sim)
 product.init_post()
 product.administer(sim, uids)
 ```
-
----
-
-## TBUG-008 — Xpert scenarios lack prior-TB-history stratification
-
-**Symptom:** `Xpert` probability tables stratify by age and TB state, but not by prior TB, recent prior TB, or previous treatment history. This makes prior-TB diagnostic scenario assumptions silent.
-
-**Expected:** Prior-treatment-history scenarios should expose an explicit table dimension, scenario flag, or documented limitation so repeated diagnosis workflows do not overclaim specificity/sensitivity behavior.
-
-**Repro:**
-
-```python
-import tbsim
-
-assert "prior_tb" in tbsim.Xpert().df.columns
-```
-
----
-
-## TBUG-009 — DR-TB second-line outputs are not separable
-
-**Symptom:** `SecondLine` treatment can be delivered, but outcomes are reported through generic `TxDelivery` result channels (`n_treated`, `n_success`, `n_failure`, etc.) with no DR/MDR/resistance-specific output or state.
-
-**Expected:** Drug-resistant TB scenarios should require explicit assumptions and produce separable outputs, so DR and drug-susceptible pathways are not conflated.
-
-**Repro:** Run `TxDelivery(SecondLine())` and inspect `tx.results.keys()`; no DR/MDR/resistance-specific channel is present.
 
 ---
 

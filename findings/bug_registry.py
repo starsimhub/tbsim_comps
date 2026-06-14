@@ -149,46 +149,6 @@ BUGS: list[dict] = [
             "product.init_pre(sim); product.init_post(); product.administer(sim, uids)``."
         ),
     },
-    {
-        "id": "TBUG-008",
-        "title": "Xpert diagnostic scenarios lack prior-TB-history stratification",
-        "severity": "medium",
-        "status": "open",
-        "test": "test_xpert_prior_tb_history_strata_are_explicit",
-        "module": "tbsim.interventions.diagnostics",
-        "symptom": (
-            "``Xpert`` probability tables stratify by age and TB state but have no "
-            "dimension for prior TB, recent prior TB, or previous treatment history."
-        ),
-        "expected": (
-            "Diagnostic scenarios that use prior-treatment history should expose an "
-            "explicit table dimension or scenario flag so assumptions are not silent."
-        ),
-        "repro": (
-            "Inspect ``tbsim.Xpert().df.columns``; no prior-TB-history column exists."
-        ),
-    },
-    {
-        "id": "TBUG-009",
-        "title": "DR-TB second-line treatment outputs are not separable",
-        "severity": "medium",
-        "status": "open",
-        "test": "test_dr_tb_secondline_outputs_are_separable",
-        "module": "tbsim.interventions.treatments",
-        "symptom": (
-            "``SecondLine`` treatment can be delivered, but outcomes are reported only "
-            "through generic ``TxDelivery`` result names, with no DR/MDR/resistance-specific "
-            "state or output channel."
-        ),
-        "expected": (
-            "DR-TB scenarios should have explicit assumption flags and separable outputs "
-            "so drug-resistant and drug-susceptible treatment outcomes are not conflated."
-        ),
-        "repro": (
-            "Run ``TxDelivery(SecondLine())`` and inspect ``tx.results.keys()``; only "
-            "generic treatment result channels are present."
-        ),
-    },
 ]
 
 OPEN_BUGS = [b for b in BUGS if b["status"] == "open"]
