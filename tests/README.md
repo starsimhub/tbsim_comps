@@ -7,7 +7,8 @@
 | `test_interventions.py` | Phase 2 intervention unit/integration checks — diagnostics, HSB, Tx, BCG, TPT, BetaByYear |
 | `test_scenarios.py` | Scientific scenario validations — care cascade, BCG, TPT, beta reduction |
 | `test_tb.py` | TB module unit/integration checks (state machine, rates, reinfection indexes) |
-| `test_tbsim_regressions.py` | **Upstream bug regressions** (TBUG-001 … TBUG-004); fail until fixed |
+| `test_dt_consistency.py` | dt sensitivity across TB, `tbsim.Sim`, and care-cascade layers (1/7/30 day) |
+| `test_tbsim_regressions.py` | **Upstream bug regressions** (TBUG-001 … TBUG-007); fail until fixed |
 
 Upstream bug documentation lives in `findings/` (see `findings/README.md`).
 
