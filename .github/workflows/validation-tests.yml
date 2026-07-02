@@ -71,6 +71,31 @@ jobs:
             cp -R existing-pages/. gh-pages-site/ || true
           fi
 
+      - name: Capture environment metadata
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          sys.path.insert(0, "scripts")
+          import generate_pages_report as gen
+
+          env = gen._collect_environment(
+              harness_repo="${{ github.repository }}",
+              harness_sha="${{ github.sha }}",
+              harness_ref="${{ github.ref_name }}",
+              tbsim_repo="${{ inputs.tbsim_repo }}",
+              tbsim_ref="${{ inputs.tbsim_branch }}",
+          )
+          Path("artifacts/environment.json").write_text(
+              json.dumps(env, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          print("Recorded", len(env.get("packages", {})), "packages")
+          PY
+
       - name: Generate GitHub Pages dashboard
         if: always()
         run: |
@@ -79,6 +104,7 @@ jobs:
             --site-dir gh-pages-site \
             --existing-history gh-pages-site/history.json \
             --pytest-html artifacts/pytest-report.html \
+            --environment-json artifacts/environment.json \
             --run-id "${{ github.run_id }}" \
             --run-number "${{ github.run_number }}" \
             --run-attempt "${{ github.run_attempt }}" \
@@ -86,7 +112,9 @@ jobs:
             --repo "${{ github.repository }}" \
             --sha "${{ github.sha }}" \
             --ref-name "${{ github.ref_name }}" \
-            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --tbsim-repo "${{ inputs.tbsim_repo }}" \
+            --tbsim-ref "${{ inputs.tbsim_branch }}"
 
       - name: Deploy report to GitHub Pages
         if: always()

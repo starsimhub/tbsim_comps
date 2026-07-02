@@ -7,8 +7,11 @@ import argparse
 import datetime as dt
 import html
 import json
+import os
+import platform
 from pathlib import Path
 import re
+import subprocess
 import sys
 import textwrap
 from urllib.parse import quote, urlencode
@@ -120,6 +123,247 @@ def _load_history(path: Path) -> dict:
         with path.open("r", encoding="utf-8") as f:
             return json.load(f)
     return {"runs": []}
+
+
+_KEY_PACKAGES = (
+    "tbsim",
+    "starsim",
+    "sciris",
+    "matplotlib",
+    "numpy",
+    "pandas",
+    "pytest",
+    "pytest-env",
+    "pytest-html",
+    "pytest-metadata",
+    "pytest-xdist",
+    "pluggy",
+    "pip",
+)
+
+
+def _package_version(name: str) -> str | None:
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        return version(name)
+    except PackageNotFoundError:
+        return None
+    except Exception:
+        return None
+
+
+def _parse_pip_freeze(lines: list[str]) -> dict[str, str]:
+    packages: dict[str, str] = {}
+    for line in lines:
+        text = line.strip()
+        if not text or text.startswith("#"):
+            continue
+        if " @ " in text:
+            name, value = text.split(" @ ", 1)
+            packages[name.strip().lower()] = value.strip()
+        elif "==" in text:
+            name, value = text.split("==", 1)
+            packages[name.strip().lower()] = value.strip()
+        else:
+            packages[text.lower()] = ""
+    return packages
+
+
+def _pip_freeze_lines() -> list[str]:
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "pip", "freeze"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+    except Exception:
+        return []
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
+def _collect_environment(
+    *,
+    harness_repo: str,
+    harness_sha: str,
+    harness_ref: str,
+    tbsim_repo: str,
+    tbsim_ref: str,
+) -> dict:
+    freeze = _pip_freeze_lines()
+    packages = _parse_pip_freeze(freeze)
+    for name in _KEY_PACKAGES:
+        if name not in packages:
+            version = _package_version(name)
+            if version:
+                packages[name] = version
+
+    env: dict = {
+        "python": platform.python_version(),
+        "platform": platform.platform(),
+        "harness_repo": harness_repo,
+        "harness_sha": harness_sha,
+        "harness_ref": harness_ref,
+        "tbsim_repo": tbsim_repo,
+        "tbsim_ref": tbsim_ref,
+        "env_vars": {
+            key: os.environ.get(key, "")
+            for key in ("MPLBACKEND", "SCIRIS_BACKEND", "CI")
+            if os.environ.get(key)
+        },
+        "packages": dict(sorted(packages.items())),
+        "pip_freeze": freeze,
+    }
+
+    try:
+        import tbsim
+
+        env["tbsim"] = {
+            "version": getattr(tbsim, "__version__", packages.get("tbsim", "")),
+            "path": tbsim.__file__,
+        }
+    except Exception as exc:
+        env["tbsim"] = {"error": str(exc)}
+
+    try:
+        import starsim
+
+        env["starsim"] = {
+            "version": getattr(starsim, "__version__", packages.get("starsim", "")),
+            "path": starsim.__file__,
+        }
+    except Exception:
+        pass
+
+    env["reproduce"] = {
+        "checkout_harness": f"git clone https://github.com/{harness_repo}.git && cd {harness_repo.split('/')[-1]} && git checkout {harness_sha}",
+        "install_tbsim": (
+            f'pip install "tbsim @ git+https://github.com/{tbsim_repo}.git@{tbsim_ref}"'
+        ),
+        "install_from_freeze": "\n".join(freeze),
+    }
+    return env
+
+
+def _load_environment_json(path: Path | None) -> dict | None:
+    if not path or not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _merge_environment(base: dict, override: dict | None) -> dict:
+    if not override:
+        return base
+    merged = dict(base)
+    for key, value in override.items():
+        if key == "packages" and isinstance(value, dict):
+            packages = dict(merged.get("packages", {}))
+            packages.update(value)
+            merged["packages"] = dict(sorted(packages.items()))
+        elif key == "pip_freeze" and isinstance(value, list) and value:
+            merged["pip_freeze"] = value
+            merged["packages"] = _parse_pip_freeze(value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _render_environment_panel(run_meta: dict) -> str:
+    env = run_meta.get("environment") or {}
+    if not env:
+        return (
+            "<section class='panel' id='run-environment'>"
+            "<div class='panel-head'><h2>Environment</h2>"
+            "<p class='panel-note'>Package versions were not recorded for this run.</p></div>"
+            "</section>"
+        )
+
+    tbsim = env.get("tbsim") or {}
+    starsim = env.get("starsim") or {}
+    env_vars = env.get("env_vars") or {}
+    reproduce = env.get("reproduce") or {}
+    packages = env.get("packages") or {}
+
+    summary_rows = [
+        ("Python", env.get("python", "")),
+        ("Platform", env.get("platform", "")),
+        ("Harness", f"{env.get('harness_repo', '')} @ {env.get('harness_sha', '')[:12]}"),
+        ("Harness ref", env.get("harness_ref", "")),
+        ("tbsim target", f"{env.get('tbsim_repo', '')}@{env.get('tbsim_ref', '')}"),
+        ("tbsim version", tbsim.get("version") or packages.get("tbsim", "")),
+        ("tbsim path", tbsim.get("path", "")),
+        ("starsim version", starsim.get("version") or packages.get("starsim", "")),
+    ]
+    if tbsim.get("error"):
+        summary_rows.append(("tbsim import", tbsim["error"]))
+
+    summary_html = "".join(
+        f"<tr><td class='env-key'>{html.escape(label)}</td><td>{html.escape(str(value))}</td></tr>"
+        for label, value in summary_rows
+        if value
+    )
+
+    env_var_html = ""
+    if env_vars:
+        env_var_html = (
+            "<p class='panel-note env-vars'>"
+            + " · ".join(
+                f"{html.escape(key)}={html.escape(str(value))}"
+                for key, value in sorted(env_vars.items())
+            )
+            + "</p>"
+        )
+
+    package_rows = "".join(
+        f"<tr><td>{html.escape(name)}</td><td>{html.escape(str(version))}</td></tr>"
+        for name, version in sorted(packages.items())
+    )
+
+    freeze_text = "\n".join(env.get("pip_freeze") or [])
+    install_cmds = "\n".join(
+        line
+        for line in (
+            reproduce.get("checkout_harness", ""),
+            reproduce.get("install_tbsim", ""),
+            "pip install pytest pytest-env pytest-xdist pytest-html",
+            "python -m pytest tests/ -v --tb=short",
+        )
+        if line
+    )
+
+    return f"""
+    <section class="panel" id="run-environment">
+      <div class="panel-head">
+        <h2>Environment</h2>
+        <p class="panel-note">Package versions captured at report time for offline reproduction</p>
+      </div>
+      {env_var_html}
+      <div class="env-actions">
+        <button type="button" class="mini-btn" data-copy-text="{_copy_attr(install_cmds)}">Copy reproduce cmds</button>
+        <button type="button" class="mini-btn" data-copy-text="{_copy_attr(freeze_text)}">Copy pip freeze</button>
+        <a class="mini-btn" href="environment.json">Download environment.json</a>
+      </div>
+      <table class="env-summary">
+        <tbody>{summary_html}</tbody>
+      </table>
+      <details class="env-details">
+        <summary>All installed packages ({len(packages)})</summary>
+        <table class="env-packages">
+          <thead><tr><th>Package</th><th>Version / source</th></tr></thead>
+          <tbody>{package_rows or "<tr><td colspan='2'>No package list recorded.</td></tr>"}</tbody>
+        </table>
+      </details>
+      <details class="env-details">
+        <summary>pip freeze</summary>
+        <pre>{html.escape(freeze_text or "No pip freeze recorded.")}</pre>
+      </details>
+    </section>
+    """
 
 
 def _status_badge(status: str) -> str:
@@ -1076,7 +1320,7 @@ _REPORT_CSS = """
 [data-theme="light"] {
   color-scheme: light;
   --bg: #e4e4e2;
-  --bg-accent: rgba(184, 115, 51, 0.06);
+  --bg-accent: rgba(76, 114, 176, 0.06);
   --bg-warm: rgba(212, 168, 50, 0.06);
   --surface: #f2f2f0;
   --surface-muted: #eaeae8;
@@ -1085,9 +1329,9 @@ _REPORT_CSS = """
   --border-strong: #b0b0ac;
   --text: #121110;
   --muted: #6e6e6a;
-  --link: #a8622a;
-  --link-hover: #8a4f1f;
-  --accent: #b87333;
+  --link: #3d5f99;
+  --link-hover: #2f4a78;
+  --accent: #4c72b0;
   --cta: #4a78a8;
   --pass: #2f8f62;
   --pass-bg: rgba(47, 143, 98, 0.12);
@@ -1105,31 +1349,31 @@ _REPORT_CSS = """
   --shadow: 0 14px 40px rgba(0, 0, 0, 0.08);
   --shadow-soft: 0 4px 18px rgba(0, 0, 0, 0.05);
   --sidebar-bg: #dcdcd9;
-  --sparkline: #b87333;
-  --sparkline-fill: rgba(184, 115, 51, 0.12);
-  --hero-glow: rgba(184, 115, 51, 0.1);
+  --sparkline: #4c72b0;
+  --sparkline-fill: rgba(76, 114, 176, 0.12);
+  --hero-glow: rgba(76, 114, 176, 0.1);
   --button-fg: #ffffff;
   --row-hover: rgba(0, 0, 0, 0.04);
   --chip-bg: #fafaf8;
-  --chip-active-bg: #b87333;
+  --chip-active-bg: #4c72b0;
   --chip-active-fg: #ffffff;
 }
 
 [data-theme="dark"] {
   color-scheme: dark;
   --bg: #040404;
-  --bg-accent: rgba(212, 132, 74, 0.12);
+  --bg-accent: rgba(100, 155, 230, 0.12);
   --bg-warm: rgba(240, 112, 104, 0.06);
   --surface: #111110;
   --surface-muted: #181817;
   --surface-raised: #222221;
   --border: rgba(255, 255, 255, 0.08);
-  --border-strong: rgba(212, 132, 74, 0.22);
+  --border-strong: rgba(100, 155, 230, 0.22);
   --text: #f4f2ee;
   --muted: #949490;
-  --link: #e89858;
-  --link-hover: #ffc088;
-  --accent: #d4844a;
+  --link: #8ab4f8;
+  --link-hover: #b0ccff;
+  --accent: #7aa3e8;
   --cta: #6898c8;
   --pass: #62c992;
   --pass-bg: rgba(98, 201, 146, 0.12);
@@ -1146,45 +1390,45 @@ _REPORT_CSS = """
   --empty: #2a2a28;
   --shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
   --shadow-soft: 0 8px 24px rgba(0, 0, 0, 0.35);
-  --shadow-glow: 0 0 48px rgba(212, 132, 74, 0.07);
+  --shadow-glow: 0 0 48px rgba(100, 155, 230, 0.07);
   --sidebar-bg: #070707;
-  --sparkline: #d4844a;
-  --sparkline-fill: rgba(212, 132, 74, 0.12);
-  --hero-glow: rgba(212, 132, 74, 0.14);
+  --sparkline: #7aa3e8;
+  --sparkline-fill: rgba(100, 155, 230, 0.12);
+  --hero-glow: rgba(100, 155, 230, 0.14);
   --button-fg: #0a0a09;
-  --row-hover: rgba(212, 132, 74, 0.06);
+  --row-hover: rgba(100, 155, 230, 0.06);
   --chip-bg: rgba(255, 255, 255, 0.04);
-  --chip-active-bg: #d4844a;
+  --chip-active-bg: #7aa3e8;
   --chip-active-fg: #0a0a09;
-  --panel-line: rgba(212, 132, 74, 0.5);
+  --panel-line: rgba(100, 155, 230, 0.5);
 }
 
 [data-theme="dark"] body {
   background:
-    radial-gradient(ellipse 900px 520px at 92% -8%, rgba(212, 132, 74, 0.1), transparent 62%),
-    radial-gradient(ellipse 680px 420px at 6% 105%, rgba(212, 132, 74, 0.05), transparent 58%),
+    radial-gradient(ellipse 900px 520px at 92% -8%, rgba(100, 155, 230, 0.1), transparent 62%),
+    radial-gradient(ellipse 680px 420px at 6% 105%, rgba(100, 155, 230, 0.05), transparent 58%),
     radial-gradient(ellipse 480px 280px at 50% 42%, rgba(255, 255, 255, 0.018), transparent 72%),
     #040404;
 }
 
 [data-theme="dark"] .sidebar {
   background:
-    linear-gradient(180deg, rgba(212, 132, 74, 0.05) 0%, transparent 32%),
+    linear-gradient(180deg, rgba(100, 155, 230, 0.05) 0%, transparent 32%),
     linear-gradient(90deg, #070707, #0a0a09);
-  box-shadow: inset -1px 0 0 rgba(212, 132, 74, 0.07);
+  box-shadow: inset -1px 0 0 rgba(100, 155, 230, 0.07);
 }
 [data-theme="dark"] .sidebar-nav a:hover {
-  background: rgba(212, 132, 74, 0.09);
-  border-color: rgba(212, 132, 74, 0.16);
+  background: rgba(100, 155, 230, 0.09);
+  border-color: rgba(100, 155, 230, 0.16);
   color: var(--text);
 }
 [data-theme="dark"] .brand-mark {
   background:
-    radial-gradient(circle at 30% 30%, rgba(212, 132, 74, 0.55), transparent 55%),
+    radial-gradient(circle at 30% 30%, rgba(100, 155, 230, 0.55), transparent 55%),
     radial-gradient(circle at 70% 70%, rgba(240, 112, 104, 0.35), transparent 50%),
     var(--surface-raised);
   border-color: var(--border-strong);
-  box-shadow: 0 0 28px rgba(212, 132, 74, 0.18);
+  box-shadow: 0 0 28px rgba(100, 155, 230, 0.18);
 }
 [data-theme="dark"] .panel,
 [data-theme="dark"] .card,
@@ -1228,27 +1472,27 @@ _REPORT_CSS = """
 [data-theme="dark"] .action-btn:hover {
   border-color: var(--border-strong);
   color: var(--link-hover);
-  background: rgba(212, 132, 74, 0.08);
+  background: rgba(100, 155, 230, 0.08);
 }
 [data-theme="dark"] .action-btn.primary {
-  background: linear-gradient(180deg, #e09558 0%, #c87238 100%);
+  background: linear-gradient(180deg, #8ab4f8 0%, #4c72b0 100%);
   border-color: rgba(255, 200, 150, 0.18);
   color: var(--button-fg);
   box-shadow:
-    0 4px 22px rgba(212, 132, 74, 0.32),
+    0 4px 22px rgba(100, 155, 230, 0.32),
     inset 0 1px 0 rgba(255, 255, 255, 0.14);
 }
 [data-theme="dark"] .action-btn.primary:hover {
   filter: brightness(1.07);
   color: var(--button-fg);
   box-shadow:
-    0 8px 30px rgba(212, 132, 74, 0.42),
+    0 8px 30px rgba(100, 155, 230, 0.42),
     inset 0 1px 0 rgba(255, 255, 255, 0.18);
 }
 [data-theme="dark"] .theme-btn.is-active {
   background: var(--accent);
   color: var(--chip-active-fg);
-  box-shadow: 0 0 16px rgba(212, 132, 74, 0.28);
+  box-shadow: 0 0 16px rgba(100, 155, 230, 0.28);
 }
 [data-theme="dark"] .mini-btn {
   color: var(--text);
@@ -1259,7 +1503,7 @@ _REPORT_CSS = """
   color: var(--chip-active-fg);
   border-color: var(--accent);
   background: var(--accent);
-  box-shadow: 0 0 14px rgba(212, 132, 74, 0.22);
+  box-shadow: 0 0 14px rgba(100, 155, 230, 0.22);
 }
 [data-theme="dark"] .test-cell .test-module {
   color: var(--muted);
@@ -1298,7 +1542,7 @@ _REPORT_CSS = """
   background: var(--chip-active-bg);
   color: var(--chip-active-fg);
   border-color: transparent;
-  box-shadow: 0 0 18px rgba(212, 132, 74, 0.24);
+  box-shadow: 0 0 18px rgba(100, 155, 230, 0.24);
 }
 [data-theme="dark"] .table-search,
 [data-theme="dark"] .table-select,
@@ -1310,7 +1554,7 @@ _REPORT_CSS = """
 [data-theme="dark"] .table-search:focus,
 [data-theme="dark"] .matrix-search:focus {
   border-color: var(--border-strong);
-  outline: 2px solid rgba(212, 132, 74, 0.25);
+  outline: 2px solid rgba(100, 155, 230, 0.25);
   outline-offset: 1px;
 }
 [data-theme="dark"] .table-search,
@@ -2173,6 +2417,39 @@ pre {
 .rich-report iframe { display: block; width: 100%; min-height: 780px; border: 0; background: #fff; }
 .rich-report p { margin: 12px 18px 18px; }
 .empty { padding: 18px; }
+.env-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.env-summary,
+.env-packages {
+  width: 100%;
+  margin-bottom: 12px;
+}
+.env-summary .env-key {
+  width: 180px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.env-summary td {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
+.env-details {
+  margin-top: 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+.env-details summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+.env-vars { margin: 0 0 12px; }
 .wrap { max-width: 1280px; margin: 0 auto; padding: 28px 24px 72px; }
 .masthead {
   display: grid;
@@ -2584,6 +2861,7 @@ def _render_run_page(
     if not fail_list:
         fail_list = "<li>No failing tests in this run.</li>"
     copy_all_failures = "\n".join(failing_cmds)
+    environment_panel = _render_environment_panel(run_meta)
 
     run_pass_rate = _pass_rate(run_meta["summary"])
     run_failures = by_status["failed"] + by_status["error"]
@@ -2619,6 +2897,7 @@ def _render_run_page(
     <div class="action-bar">
       <a class="action-btn primary" href="{html.escape(run_meta["run_url"])}" target="_blank" rel="noopener">Open GitHub Actions</a>
       <button type="button" class="action-btn" data-jump="#failing-tests">Jump to failures</button>
+      <button type="button" class="action-btn" data-jump="#run-environment">Environment</button>
       <button type="button" class="action-btn" data-jump="#full-test-list">Full test list</button>
       {f'<button type="button" class="action-btn" data-copy-text="{_copy_attr(copy_all_failures)}">Copy all failing pytest cmds</button>' if failing_cmds else '<button type="button" class="action-btn" disabled>Copy all failing pytest cmds</button>'}
       {f'<a class="action-btn" href="{html.escape(TBSIM_ISSUES_URL)}" target="_blank" rel="noopener">Browse tbsim issues</a>' if failing_cmds else ''}
@@ -2655,6 +2934,7 @@ def _render_run_page(
       </div>
     </section>
     {rich_report_panel}
+    {environment_panel}
     <section class="panel" id="failing-tests">
       <div class="panel-head">
         <h2>Failing tests</h2>
@@ -2843,7 +3123,6 @@ def _render_dashboard(site_dir: Path, runs: list[dict]) -> None:
     latest_failures = 0
     latest_stamp = "No runs recorded yet"
     latest_note = "Waiting for first CI execution"
-    stat_cls = ""
     if latest:
         latest_failures = latest["summary"]["failed"] + latest["summary"]["error"]
         latest_stamp = (
@@ -2853,7 +3132,6 @@ def _render_dashboard(site_dir: Path, runs: list[dict]) -> None:
         latest_note = (
             f"{latest['summary']['passed']}/{latest['summary']['total']} tests passed"
         )
-        stat_cls = "fail" if latest_failures else "pass"
 
     gauge_gradient = (
         f"conic-gradient(var(--pass) 0 {latest_pass_rate}%, var(--empty) {latest_pass_rate}% 100%)"
@@ -2875,7 +3153,7 @@ def _render_dashboard(site_dir: Path, runs: list[dict]) -> None:
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>tbsim validation registry</title>
+  <title>TBSim Validation Dashboard</title>
   <script>{_REPORT_THEME_SCRIPT}</script>
   <style>
 {_REPORT_CSS}
@@ -2887,7 +3165,7 @@ def _render_dashboard(site_dir: Path, runs: list[dict]) -> None:
       <div class="sidebar-brand">
         <div class="brand-mark" aria-hidden="true"></div>
         <div class="brand-copy">
-          <strong>tbsim registry</strong>
+          <strong>TBSim Comps</strong>
           <span>External validation harness</span>
         </div>
       </div>
@@ -2915,7 +3193,7 @@ def _render_dashboard(site_dir: Path, runs: list[dict]) -> None:
       <div class="topbar" id="overview">
         <div>
           <p class="eyebrow">Starsim · CI validation</p>
-          <h1>tbsim validation registry</h1>
+          <h1>TBSim Validation Dashboard</h1>
         </div>
         <div class="topbar-actions">
           {_THEME_SWITCHER}
@@ -2942,7 +3220,7 @@ def _render_dashboard(site_dir: Path, runs: list[dict]) -> None:
             <span class="overview-ring-value">{latest_pass_rate}%</span>
           </div>
           <div class="overview-kpis">
-            <div class="kpi-cell {stat_cls}">
+            <div class="kpi-cell pass">
               <span class="kpi-label">Passed</span>
               <span class="kpi-value">{latest_note}</span>
               <span class="kpi-note">{latest_pass_rate}% pass rate</span>
@@ -3070,6 +3348,9 @@ def main() -> None:
     parser.add_argument("--sha", required=True)
     parser.add_argument("--ref-name", required=True)
     parser.add_argument("--run-url", required=True)
+    parser.add_argument("--tbsim-repo", default="starsimhub/tbsim")
+    parser.add_argument("--tbsim-ref", default="main")
+    parser.add_argument("--environment-json", type=Path)
     args = parser.parse_args()
 
     args.site_dir.mkdir(parents=True, exist_ok=True)
@@ -3108,6 +3389,21 @@ def main() -> None:
         run_status = "skipped"
 
     now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    environment = _merge_environment(
+        _collect_environment(
+            harness_repo=args.repo,
+            harness_sha=args.sha,
+            harness_ref=args.ref_name,
+            tbsim_repo=args.tbsim_repo,
+            tbsim_ref=args.tbsim_ref,
+        ),
+        _load_environment_json(args.environment_json),
+    )
+    (run_dir / "environment.json").write_text(
+        json.dumps(environment, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
     run_meta = {
         "run_id": args.run_id,
         "run_number": args.run_number,
@@ -3122,6 +3418,7 @@ def main() -> None:
         "tests": test_status_map,
         "timestamp": now,
         "report_path": f"runs/{args.run_id}/index.html",
+        "environment": environment,
     }
 
     runs = history.get("runs", [])
@@ -3137,7 +3434,7 @@ def main() -> None:
     runs = sorted(runs, key=lambda r: (r.get("timestamp", ""), r.get("run_number", 0)))
     history["runs"] = runs
     history["generated_at"] = now
-    history["schema_version"] = 1
+    history["schema_version"] = 2
 
     _render_run_page(run_dir, run_meta, tests, pytest_html_relpath)
     _render_dashboard(args.site_dir, runs)
