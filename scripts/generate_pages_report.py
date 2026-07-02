@@ -118,6 +118,157 @@ def _parse_junit(junit_path: Path) -> tuple[list[dict], dict]:
     return testcases, summary
 
 
+def _canonical_test_id(test_id: str) -> str:
+    if "::" not in test_id:
+        return test_id
+    module, name = test_id.split("::", 1)
+    if module.endswith(".py"):
+        return test_id
+    if "." in module and "/" not in module:
+        module = f"{module.replace('.', '/')}.py"
+    return f"{module}::{name}"
+
+
+def _parse_pytest_html(pytest_html_path: Path) -> dict | None:
+    if not pytest_html_path.exists():
+        return None
+    try:
+        text = pytest_html_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = re.search(r'data-jsonblob="([^"]+)"', text)
+    if not match:
+        return None
+    try:
+        return json.loads(html.unescape(match.group(1)))
+    except json.JSONDecodeError:
+        return None
+
+
+def _pytest_html_logs(pytest_data: dict | None) -> dict[str, str]:
+    if not pytest_data:
+        return {}
+    logs: dict[str, str] = {}
+    for test_id, entries in pytest_data.get("tests", {}).items():
+        if not entries:
+            continue
+        log = entries[0].get("log", "")
+        if log:
+            logs[_canonical_test_id(test_id)] = html.unescape(log)
+    return logs
+
+
+def _merge_pytest_environment(env: dict, pytest_env: dict | None) -> dict:
+    if not pytest_env:
+        return env
+    merged = dict(env)
+    merged["pytest_metadata"] = dict(pytest_env)
+    if not merged.get("python") and pytest_env.get("Python"):
+        merged["python"] = str(pytest_env["Python"])
+    if not merged.get("platform") and pytest_env.get("Platform"):
+        merged["platform"] = str(pytest_env["Platform"])
+    packages = dict(merged.get("packages") or {})
+    for name, version in (pytest_env.get("Packages") or {}).items():
+        packages.setdefault(str(name), str(version))
+    merged["packages"] = dict(sorted(packages.items()))
+    return merged
+
+
+def _failure_summary_line(detail: str) -> str:
+    for line in detail.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("E   "):
+            return stripped[3:].strip()
+        if stripped.startswith("E "):
+            return stripped[2:].strip()
+    for line in detail.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped[:240]
+    return "No traceback provided."
+
+
+def _format_traceback_html(detail: str) -> str:
+    lines: list[str] = []
+    for line in detail.splitlines():
+        escaped = html.escape(line, quote=False)
+        if re.match(r"^E\s+", line):
+            lines.append(f"<span class='tb-line tb-err'>{escaped}</span>")
+        elif re.match(r"^\s+\^+", line):
+            lines.append(f"<span class='tb-line tb-caret'>{escaped}</span>")
+        elif re.search(r"\.py:\d+:", line) or " in " in line:
+            lines.append(f"<span class='tb-line tb-frame'>{escaped}</span>")
+        elif line.strip().startswith("assert "):
+            lines.append(f"<span class='tb-line tb-assert'>{escaped}</span>")
+        else:
+            lines.append(f"<span class='tb-line'>{escaped}</span>")
+    if not lines:
+        return "<span class='tb-line tb-muted'>No traceback provided.</span>"
+    return "\n".join(lines)
+
+
+def _render_failure_traceback(
+    test: dict,
+    *,
+    pytest_cmd: str,
+    run_meta: dict,
+    anchor: str,
+) -> str:
+    detail = test.get("detail", "") or "No traceback provided."
+    summary = _failure_summary_line(detail)
+    source = _source_url(run_meta["repo"], run_meta["sha"], test["file"], test["line"])
+    source_link = (
+        f"<a class='link-btn' href='{html.escape(source)}' target='_blank' rel='noopener'>Open source</a>"
+        if source
+        else ""
+    )
+    location = ""
+    if test.get("file"):
+        loc = html.escape(test["file"])
+        if test.get("line"):
+            loc += f":{html.escape(str(test['line']))}"
+        location = f"<span class='failure-location'>{loc}</span>"
+
+    return f"""
+    <article class="failure-card" id="{anchor}">
+      <header class="failure-card-head">
+        <div>
+          <p class="failure-module">{html.escape(_parse_test_id(test['id'])[0] or 'test')}</p>
+          <h3 class="failure-title">{html.escape(test['id'])}</h3>
+          <p class="failure-summary">{html.escape(summary)}</p>
+          {location}
+        </div>
+        <div class="failure-card-actions">
+          {_status_badge(test['status'])}
+          {_tbsim_issue_actions(test['id'], pytest_cmd=pytest_cmd, run_meta=run_meta, detail=detail, anchor=anchor)}
+          {source_link}
+          <button type="button" class="mini-btn" data-copy-text="{_copy_attr(pytest_cmd)}">Copy pytest cmd</button>
+          <button type="button" class="mini-btn" data-copy-text="{_copy_attr(detail[:20000])}">Copy traceback</button>
+        </div>
+      </header>
+      <div class="traceback-block" role="region" aria-label="Traceback for {html.escape(test['id'])}">
+        {_format_traceback_html(detail[:20000])}
+      </div>
+    </article>
+    """
+
+
+def _render_pytest_html_fallback(pytest_report_relpath: str | None) -> str:
+    if not pytest_report_relpath:
+        return ""
+    return (
+        "<details class='panel rich-report'>"
+        "<summary><span>Original pytest-html report</span>"
+        "<small><span class='hint-closed'>Expand full pytest-html UI</span>"
+        "<span class='hint-open'>Collapse</span></small></summary>"
+        f"<iframe src='{html.escape(pytest_report_relpath)}' title='pytest-html report'></iframe>"
+        f"<p class='rich-report-foot'>"
+        f"<a class='button' href='{html.escape(pytest_report_relpath)}' target='_blank' rel='noopener'>"
+        "Open pytest-html in a new tab</a></p>"
+        "</details>"
+    )
+
+
 def _load_history(path: Path) -> dict:
     if path.exists():
         with path.open("r", encoding="utf-8") as f:
@@ -302,11 +453,51 @@ def _render_environment_panel(run_meta: dict) -> str:
     if tbsim.get("error"):
         summary_rows.append(("tbsim import", tbsim["error"]))
 
+    pytest_meta = env.get("pytest_metadata") or {}
+    if pytest_meta.get("CI"):
+        summary_rows.append(("CI", str(pytest_meta["CI"])))
+    if pytest_meta.get("JAVA_HOME"):
+        summary_rows.append(("JAVA_HOME", str(pytest_meta["JAVA_HOME"])))
+
     summary_html = "".join(
         f"<tr><td class='env-key'>{html.escape(label)}</td><td>{html.escape(str(value))}</td></tr>"
         for label, value in summary_rows
         if value
     )
+
+    pytest_plugins_html = ""
+    plugins = pytest_meta.get("Plugins") or {}
+    if plugins:
+        plugin_rows = "".join(
+            f"<tr><td>{html.escape(str(name))}</td><td>{html.escape(str(version))}</td></tr>"
+            for name, version in sorted(plugins.items())
+        )
+        pytest_plugins_html = f"""
+      <details class="env-details">
+        <summary>pytest plugins ({len(plugins)})</summary>
+        <table class="env-packages">
+          <thead><tr><th>Plugin</th><th>Version</th></tr></thead>
+          <tbody>{plugin_rows}</tbody>
+        </table>
+      </details>
+        """
+
+    pytest_packages_html = ""
+    pytest_packages = pytest_meta.get("Packages") or {}
+    if pytest_packages:
+        pkg_rows = "".join(
+            f"<tr><td>{html.escape(str(name))}</td><td>{html.escape(str(version))}</td></tr>"
+            for name, version in sorted(pytest_packages.items())
+        )
+        pytest_packages_html = f"""
+      <details class="env-details">
+        <summary>pytest environment packages ({len(pytest_packages)})</summary>
+        <table class="env-packages">
+          <thead><tr><th>Package</th><th>Version</th></tr></thead>
+          <tbody>{pkg_rows}</tbody>
+        </table>
+      </details>
+        """
 
     env_var_html = ""
     if env_vars:
@@ -362,6 +553,8 @@ def _render_environment_panel(run_meta: dict) -> str:
         <summary>pip freeze</summary>
         <pre>{html.escape(freeze_text or "No pip freeze recorded.")}</pre>
       </details>
+      {pytest_plugins_html}
+      {pytest_packages_html}
     </section>
     """
 
@@ -1361,16 +1554,16 @@ _REPORT_CSS = """
 
 [data-theme="dark"] {
   color-scheme: dark;
-  --bg: #040404;
-  --bg-accent: rgba(100, 155, 230, 0.12);
+  --bg: #0a0a0a;
+  --bg-accent: rgba(255, 255, 255, 0.04);
   --bg-warm: rgba(240, 112, 104, 0.06);
-  --surface: #111110;
-  --surface-muted: #181817;
-  --surface-raised: #222221;
-  --border: rgba(255, 255, 255, 0.08);
-  --border-strong: rgba(100, 155, 230, 0.22);
-  --text: #f4f2ee;
-  --muted: #949490;
+  --surface: #111111;
+  --surface-muted: #181818;
+  --surface-raised: #222222;
+  --border: rgba(255, 255, 255, 0.1);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --text: #f0f0f0;
+  --muted: #999999;
   --link: #8ab4f8;
   --link-hover: #b0ccff;
   --accent: #7aa3e8;
@@ -1387,48 +1580,45 @@ _REPORT_CSS = """
   --skip: #707070;
   --skip-bg: rgba(112, 112, 112, 0.12);
   --skip-border: rgba(112, 112, 112, 0.24);
-  --empty: #2a2a28;
+  --empty: #2a2a2a;
   --shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
   --shadow-soft: 0 8px 24px rgba(0, 0, 0, 0.35);
-  --shadow-glow: 0 0 48px rgba(100, 155, 230, 0.07);
-  --sidebar-bg: #070707;
+  --shadow-glow: 0 0 48px rgba(255, 255, 255, 0.03);
+  --sidebar-bg: #080808;
   --sparkline: #7aa3e8;
-  --sparkline-fill: rgba(100, 155, 230, 0.12);
-  --hero-glow: rgba(100, 155, 230, 0.14);
-  --button-fg: #0a0a09;
-  --row-hover: rgba(100, 155, 230, 0.06);
-  --chip-bg: rgba(255, 255, 255, 0.04);
+  --sparkline-fill: rgba(122, 163, 232, 0.12);
+  --hero-glow: rgba(122, 163, 232, 0.1);
+  --button-fg: #0a0a0a;
+  --row-hover: rgba(255, 255, 255, 0.04);
+  --chip-bg: rgba(255, 255, 255, 0.05);
   --chip-active-bg: #7aa3e8;
-  --chip-active-fg: #0a0a09;
-  --panel-line: rgba(100, 155, 230, 0.5);
+  --chip-active-fg: #0a0a0a;
+  --panel-line: rgba(255, 255, 255, 0.12);
 }
 
 [data-theme="dark"] body {
   background:
-    radial-gradient(ellipse 900px 520px at 92% -8%, rgba(100, 155, 230, 0.1), transparent 62%),
-    radial-gradient(ellipse 680px 420px at 6% 105%, rgba(100, 155, 230, 0.05), transparent 58%),
-    radial-gradient(ellipse 480px 280px at 50% 42%, rgba(255, 255, 255, 0.018), transparent 72%),
-    #040404;
+    radial-gradient(ellipse 900px 520px at 92% -8%, rgba(255, 255, 255, 0.04), transparent 62%),
+    radial-gradient(ellipse 680px 420px at 6% 105%, rgba(255, 255, 255, 0.02), transparent 58%),
+    #0a0a0a;
 }
 
 [data-theme="dark"] .sidebar {
-  background:
-    linear-gradient(180deg, rgba(100, 155, 230, 0.05) 0%, transparent 32%),
-    linear-gradient(90deg, #070707, #0a0a09);
-  box-shadow: inset -1px 0 0 rgba(100, 155, 230, 0.07);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, transparent 32%), #080808;
+  box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.06);
 }
 [data-theme="dark"] .sidebar-nav a:hover {
-  background: rgba(100, 155, 230, 0.09);
-  border-color: rgba(100, 155, 230, 0.16);
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.1);
   color: var(--text);
 }
 [data-theme="dark"] .brand-mark {
   background:
-    radial-gradient(circle at 30% 30%, rgba(100, 155, 230, 0.55), transparent 55%),
-    radial-gradient(circle at 70% 70%, rgba(240, 112, 104, 0.35), transparent 50%),
+    radial-gradient(circle at 30% 30%, rgba(98, 201, 146, 0.45), transparent 55%),
+    radial-gradient(circle at 70% 70%, rgba(240, 112, 104, 0.3), transparent 50%),
     var(--surface-raised);
   border-color: var(--border-strong);
-  box-shadow: 0 0 28px rgba(100, 155, 230, 0.18);
+  box-shadow: 0 0 20px rgba(0, 0, 0, 0.4);
 }
 [data-theme="dark"] .panel,
 [data-theme="dark"] .card,
@@ -1436,11 +1626,10 @@ _REPORT_CSS = """
 [data-theme="dark"] .stamp,
 [data-theme="dark"] .theme-switch,
 [data-theme="dark"] .action-panel {
-  background: linear-gradient(165deg, rgba(34, 34, 33, 0.96), rgba(17, 17, 16, 0.99));
+  background: linear-gradient(165deg, rgba(34, 34, 34, 0.96), rgba(17, 17, 17, 0.99));
   border-color: var(--border);
   box-shadow:
     var(--shadow-soft),
-    var(--shadow-glow),
     inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 [data-theme="dark"] .panel {
@@ -1458,7 +1647,7 @@ _REPORT_CSS = """
   pointer-events: none;
 }
 [data-theme="dark"] .overview-ring::after {
-  background: linear-gradient(165deg, #222221, #111110);
+  background: linear-gradient(165deg, #222222, #111111);
   box-shadow: inset 0 0 24px rgba(0, 0, 0, 0.45);
 }
 [data-theme="dark"] .kpi-cell {
@@ -1472,27 +1661,27 @@ _REPORT_CSS = """
 [data-theme="dark"] .action-btn:hover {
   border-color: var(--border-strong);
   color: var(--link-hover);
-  background: rgba(100, 155, 230, 0.08);
+  background: rgba(255, 255, 255, 0.06);
 }
 [data-theme="dark"] .action-btn.primary {
   background: linear-gradient(180deg, #8ab4f8 0%, #4c72b0 100%);
-  border-color: rgba(255, 200, 150, 0.18);
-  color: var(--button-fg);
+  border-color: rgba(255, 255, 255, 0.14);
+  color: #ffffff;
   box-shadow:
-    0 4px 22px rgba(100, 155, 230, 0.32),
+    0 4px 22px rgba(76, 114, 176, 0.28),
     inset 0 1px 0 rgba(255, 255, 255, 0.14);
 }
 [data-theme="dark"] .action-btn.primary:hover {
   filter: brightness(1.07);
-  color: var(--button-fg);
+  color: #ffffff;
   box-shadow:
-    0 8px 30px rgba(100, 155, 230, 0.42),
+    0 8px 30px rgba(76, 114, 176, 0.36),
     inset 0 1px 0 rgba(255, 255, 255, 0.18);
 }
 [data-theme="dark"] .theme-btn.is-active {
   background: var(--accent);
-  color: var(--chip-active-fg);
-  box-shadow: 0 0 16px rgba(100, 155, 230, 0.28);
+  color: #ffffff;
+  box-shadow: 0 0 16px rgba(76, 114, 176, 0.22);
 }
 [data-theme="dark"] .mini-btn {
   color: var(--text);
@@ -1500,10 +1689,10 @@ _REPORT_CSS = """
   border-color: var(--border);
 }
 [data-theme="dark"] .mini-btn:hover {
-  color: var(--chip-active-fg);
+  color: #ffffff;
   border-color: var(--accent);
   background: var(--accent);
-  box-shadow: 0 0 14px rgba(100, 155, 230, 0.22);
+  box-shadow: 0 0 14px rgba(76, 114, 176, 0.18);
 }
 [data-theme="dark"] .test-cell .test-module {
   color: var(--muted);
@@ -1540,9 +1729,9 @@ _REPORT_CSS = """
 }
 [data-theme="dark"] .filter-chip.is-active {
   background: var(--chip-active-bg);
-  color: var(--chip-active-fg);
+  color: #ffffff;
   border-color: transparent;
-  box-shadow: 0 0 18px rgba(100, 155, 230, 0.24);
+  box-shadow: 0 0 18px rgba(76, 114, 176, 0.18);
 }
 [data-theme="dark"] .table-search,
 [data-theme="dark"] .table-select,
@@ -1554,12 +1743,12 @@ _REPORT_CSS = """
 [data-theme="dark"] .table-search:focus,
 [data-theme="dark"] .matrix-search:focus {
   border-color: var(--border-strong);
-  outline: 2px solid rgba(100, 155, 230, 0.25);
+  outline: 2px solid rgba(122, 163, 232, 0.22);
   outline-offset: 1px;
 }
 [data-theme="dark"] .table-search,
 [data-theme="dark"] .matrix-search {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='none' stroke='%23949490' stroke-width='2'%3E%3Ccircle cx='7' cy='7' r='5'/%3E%3Cpath d='M11 11l3 3'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='none' stroke='%23999999' stroke-width='2'%3E%3Ccircle cx='7' cy='7' r='5'/%3E%3Cpath d='M11 11l3 3'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: 12px center;
 }
@@ -1584,8 +1773,16 @@ _REPORT_CSS = """
   background: rgba(255, 255, 255, 0.02);
 }
 [data-theme="dark"] pre {
-  background: #0a0a09;
+  background: #0a0a0a;
   border: 1px solid var(--border);
+}
+[data-theme="dark"] .traceback-block {
+  background: #0a0a0a;
+  border-color: var(--border);
+}
+[data-theme="dark"] .failure-card {
+  border-color: var(--fail-border);
+  background: linear-gradient(165deg, rgba(34, 34, 34, 0.96), rgba(17, 17, 17, 0.99));
 }
 
 * { box-sizing: border-box; }
@@ -2415,7 +2612,77 @@ pre {
 .rich-report:not([open]) .hint-open { display: none; }
 .rich-report[open] .hint-closed { display: none; }
 .rich-report iframe { display: block; width: 100%; min-height: 780px; border: 0; background: #fff; }
-.rich-report p { margin: 12px 18px 18px; }
+.rich-report-foot { margin: 12px 18px 18px; }
+.failure-tracebacks {
+  display: grid;
+  gap: 16px;
+  margin-top: 18px;
+}
+.failure-card {
+  border: 1px solid var(--fail-border);
+  border-radius: 16px;
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+  overflow: hidden;
+}
+.failure-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, var(--fail-bg), transparent);
+}
+.failure-module {
+  margin: 0 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.failure-title {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.35;
+  color: var(--text);
+  word-break: break-word;
+}
+.failure-summary {
+  margin: 8px 0 0;
+  color: var(--fail);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.failure-location {
+  display: inline-block;
+  margin-top: 8px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--muted);
+}
+.failure-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.traceback-block {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  padding: 14px 18px;
+  overflow-x: auto;
+  background: var(--surface-muted);
+}
+.tb-line { display: block; white-space: pre-wrap; }
+.tb-frame { color: var(--muted); }
+.tb-err { color: var(--fail); font-weight: 600; }
+.tb-caret { color: var(--warn); }
+.tb-assert { color: var(--text); }
+.tb-muted { color: var(--muted); }
 .empty { padding: 18px; }
 .env-actions {
   display: flex;
@@ -2750,6 +3017,7 @@ def _render_run_page(
     run_meta: dict,
     tests: list[dict],
     pytest_report_relpath: str | None,
+    pytest_html_logs: dict[str, str] | None = None,
 ) -> None:
     failed = [t for t in tests if t["status"] in {"failed", "error"}]
     by_status = {"failed": 0, "error": 0, "skipped": 0, "passed": 0}
@@ -2757,8 +3025,9 @@ def _render_run_page(
         by_status[t["status"]] = by_status.get(t["status"], 0) + 1
 
     rows = []
-    detail_cards = []
+    failure_cards: list[str] = []
     failing_cmds: list[str] = []
+    html_logs = pytest_html_logs or {}
     max_duration = max((t["duration"] for t in tests), default=1.0) or 1.0
     modules = sorted({(_parse_test_id(t["id"])[0] or "other") for t in tests})
     module_options = "".join(
@@ -2771,6 +3040,18 @@ def _render_run_page(
         module, name = _parse_test_id(t["id"])
         if t["status"] in {"failed", "error"}:
             failing_cmds.append(pytest_cmd)
+            enriched = dict(t)
+            log = html_logs.get(_canonical_test_id(t["id"]))
+            if log:
+                enriched["detail"] = log
+            failure_cards.append(
+                _render_failure_traceback(
+                    enriched,
+                    pytest_cmd=pytest_cmd,
+                    run_meta=run_meta,
+                    anchor=anchor,
+                )
+            )
         source = _source_url(run_meta["repo"], run_meta["sha"], t["file"], t["line"])
         source_link = (
             f"<a class='link-btn' href='{html.escape(source)}' target='_blank' rel='noopener'>Source</a>"
@@ -2821,35 +3102,7 @@ def _render_run_page(
             "</tr>"
         )
 
-        if t["status"] in {"failed", "error"}:
-            detail = html.escape(t["detail"][:20000] or "No traceback provided.")
-            detail_cards.append(
-                "<section class='card'>"
-                f"<h3 id='{anchor}'>{html.escape(t['id'])}</h3>"
-                f"<p>{_status_badge(t['status'])} "
-                f"{_tbsim_issue_actions(t['id'], pytest_cmd=pytest_cmd, run_meta=run_meta, detail=t.get('detail', ''), anchor=anchor)} "
-                f"<button type='button' class='mini-btn' data-copy-text='{_copy_attr(pytest_cmd)}'>Copy pytest cmd</button>"
-                f"</p>"
-                f"<pre>{detail}</pre>"
-                "</section>"
-            )
-
-    rich_report_panel = (
-        "<details class='card rich-report'>"
-        "<summary><span>Rich pytest report</span>"
-        "<small><span class='hint-closed'>Click to expand</span>"
-        "<span class='hint-open'>Click to collapse</span></small></summary>"
-        f"<iframe src='{html.escape(pytest_report_relpath)}' title='Rich pytest-html report'></iframe>"
-        f"<p><a class='button' href='{html.escape(pytest_report_relpath)}'>Open rich report in a new tab</a></p>"
-        "</details>"
-        if pytest_report_relpath
-        else (
-            "<section class='card rich-report empty'>"
-            "<h2>Rich pytest report unavailable</h2>"
-            "<p>The pytest-html artifact was not produced for this run.</p>"
-            "</section>"
-        )
-    )
+    rich_report_panel = _render_pytest_html_fallback(pytest_report_relpath)
 
     fail_list = "".join(
         f"<li><a href='#{_test_anchor(t['id'])}'>{html.escape(t['id'])}</a> "
@@ -2862,6 +3115,11 @@ def _render_run_page(
         fail_list = "<li>No failing tests in this run.</li>"
     copy_all_failures = "\n".join(failing_cmds)
     environment_panel = _render_environment_panel(run_meta)
+    failure_tracebacks_html = (
+        f"<div class='failure-tracebacks'>{''.join(failure_cards)}</div>"
+        if failure_cards
+        else "<p class='panel-note'>No failing tests in this run.</p>"
+    )
 
     run_pass_rate = _pass_rate(run_meta["summary"])
     run_failures = by_status["failed"] + by_status["error"]
@@ -2901,7 +3159,7 @@ def _render_run_page(
       <button type="button" class="action-btn" data-jump="#full-test-list">Full test list</button>
       {f'<button type="button" class="action-btn" data-copy-text="{_copy_attr(copy_all_failures)}">Copy all failing pytest cmds</button>' if failing_cmds else '<button type="button" class="action-btn" disabled>Copy all failing pytest cmds</button>'}
       {f'<a class="action-btn" href="{html.escape(TBSIM_ISSUES_URL)}" target="_blank" rel="noopener">Browse tbsim issues</a>' if failing_cmds else ''}
-      {f'<a class="action-btn" href="{html.escape(pytest_report_relpath)}">Open rich report</a>' if pytest_report_relpath else ''}
+      {f'<a class="action-btn" href="{html.escape(pytest_report_relpath)}" target="_blank" rel="noopener">Open pytest-html</a>' if pytest_report_relpath else ''}
     </div>
     <section class="hero-row">
       <div class="summary-grid">
@@ -2933,14 +3191,14 @@ def _render_run_page(
         <p class="gauge-label">Pass rate</p>
       </div>
     </section>
-    {rich_report_panel}
     {environment_panel}
     <section class="panel" id="failing-tests">
       <div class="panel-head">
         <h2>Failing tests</h2>
-        <p class="panel-note">{run_failures} need attention · file upstream bugs, then link the GitHub issue number</p>
+        <p class="panel-note">{run_failures} need attention · tracebacks from pytest · file upstream bugs, then link the GitHub issue number</p>
       </div>
       <ul>{fail_list}</ul>
+      {failure_tracebacks_html}
     </section>
     <section class="panel" id="full-test-list">
       <div class="panel-head">
@@ -2985,7 +3243,7 @@ def _render_run_page(
         </tbody>
       </table>
     </section>
-    {"".join(detail_cards)}
+    {rich_report_panel}
   </div>
   {_issue_links_script()}
   <script>{_REPORT_JS}</script>
@@ -3153,7 +3411,7 @@ def _render_dashboard(site_dir: Path, runs: list[dict]) -> None:
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>TBSim Validation Dashboard</title>
+  <title>TBSim Comps Test Suite</title>
   <script>{_REPORT_THEME_SCRIPT}</script>
   <style>
 {_REPORT_CSS}
@@ -3193,7 +3451,7 @@ def _render_dashboard(site_dir: Path, runs: list[dict]) -> None:
       <div class="topbar" id="overview">
         <div>
           <p class="eyebrow">Starsim · CI validation</p>
-          <h1>TBSim Validation Dashboard</h1>
+          <h1>TBSim Comps Test Suite</h1>
         </div>
         <div class="topbar-actions">
           {_THEME_SWITCHER}
@@ -3373,12 +3631,14 @@ def main() -> None:
         )
 
     pytest_html_relpath = None
+    pytest_html_data = None
     if args.pytest_html and args.pytest_html.exists():
         html_target = run_dir / "pytest-report.html"
         html_target.write_text(
             args.pytest_html.read_text(encoding="utf-8"), encoding="utf-8"
         )
         pytest_html_relpath = "pytest-report.html"
+        pytest_html_data = _parse_pytest_html(html_target)
 
     history_path = args.existing_history if args.existing_history else Path("")
     history = _load_history(history_path) if str(history_path) else {"runs": []}
@@ -3398,6 +3658,10 @@ def main() -> None:
             tbsim_ref=args.tbsim_ref,
         ),
         _load_environment_json(args.environment_json),
+    )
+    environment = _merge_pytest_environment(
+        environment,
+        (pytest_html_data or {}).get("environment"),
     )
     (run_dir / "environment.json").write_text(
         json.dumps(environment, indent=2, sort_keys=True) + "\n",
@@ -3436,7 +3700,13 @@ def main() -> None:
     history["generated_at"] = now
     history["schema_version"] = 2
 
-    _render_run_page(run_dir, run_meta, tests, pytest_html_relpath)
+    _render_run_page(
+        run_dir,
+        run_meta,
+        tests,
+        pytest_html_relpath,
+        _pytest_html_logs(pytest_html_data),
+    )
     _render_dashboard(args.site_dir, runs)
     (args.site_dir / "history.json").write_text(
         json.dumps(history, indent=2, sort_keys=True), encoding="utf-8"
